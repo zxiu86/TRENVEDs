@@ -1,0 +1,287 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-sans: "DM Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  html,
+  body {
+    font-family: var(--font-sans);
+    background-color: #060608;
+    color: #f4f4f5;
+    overflow-x: hidden;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+  }
+
+  button:not(:disabled),
+  a[href],
+  select:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+/* Architectural Studio Ambient Backdrop (gives Glassmorphism real light & depth to refract) */
+.studio-ambient-stage {
+  background-color: #060608;
+  background-image:
+    radial-gradient(ellipse 68% 54% at 14% 10%, rgba(220, 38, 38, 0.11), transparent 60%),
+    radial-gradient(ellipse 60% 50% at 86% 18%, rgba(148, 163, 184, 0.08), transparent 62%),
+    radial-gradient(ellipse 72% 48% at 52% 96%, rgba(185, 28, 28, 0.085), transparent 64%),
+    linear-gradient(180deg, rgba(16, 18, 26, 0.55) 0%, rgba(6, 6, 8, 0.96) 100%);
+}
+
+/* Tier 1: Primary Studio Glass Panels & Cards */
+.studio-glass {
+  background: linear-gradient(
+    155deg,
+    rgba(255, 255, 255, 0.065) 0%,
+    rgba(22, 24, 34, 0.54) 38%,
+    rgba(10, 11, 16, 0.68) 100%
+  );
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+  border: 1px solid rgba(255, 255, 255, 0.095);
+  box-shadow:
+    0 22px 48px -20px rgba(0, 0, 0, 0.85),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.13),
+    inset 1px 0 0 0 rgba(255, 255, 255, 0.045);
+}
+
+/* Tier 2: Compact Controls, Toolbars & Floating Interactive Strips */
+.studio-glass-control {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.075) 0%,
+    rgba(20, 22, 31, 0.58) 100%
+  );
+  backdrop-filter: blur(12px) saturate(125%);
+  -webkit-backdrop-filter: blur(12px) saturate(125%);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 8px 20px -10px rgba(0, 0, 0, 0.72),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.11);
+}
+
+/* Tier 3: Elevated Glass (Top Headers, Dialogs, Fullscreen Floating HUD) */
+.studio-glass-elevated {
+  background: linear-gradient(
+    160deg,
+    rgba(38, 41, 56, 0.66) 0%,
+    rgba(16, 18, 25, 0.78) 52%,
+    rgba(9, 10, 14, 0.88) 100%
+  );
+  backdrop-filter: blur(24px) saturate(145%);
+  -webkit-backdrop-filter: blur(24px) saturate(145%);
+  border: 1px solid rgba(255, 255, 255, 0.125);
+  box-shadow:
+    0 32px 72px -22px rgba(0, 0, 0, 0.94),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.16),
+    inset 1px 0 0 0 rgba(255, 255, 255, 0.05);
+}
+
+.studio-glass-header {
+  background: linear-gradient(
+    180deg,
+    rgba(22, 24, 34, 0.72) 0%,
+    rgba(11, 12, 17, 0.66) 100%
+  );
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.085);
+  box-shadow:
+    0 12px 32px -18px rgba(0, 0, 0, 0.85),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Subtle crimson side-edge rim lighting (delicate edge light, never full-panel glow) */
+.crimson-edge-left {
+  position: relative;
+}
+
+.crimson-edge-left::before {
+  content: "";
+  position: absolute;
+  top: 12%;
+  bottom: 12%;
+  left: 0;
+  width: 1px;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgba(220, 38, 38, 0.72) 32%,
+    rgba(248, 113, 113, 0.82) 50%,
+    rgba(220, 38, 38, 0.72) 68%,
+    transparent
+  );
+  box-shadow: 0 0 12px 1px rgba(220, 38, 38, 0.24);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.crimson-edge-right {
+  position: relative;
+}
+
+.crimson-edge-right::after {
+  content: "";
+  position: absolute;
+  top: 12%;
+  bottom: 12%;
+  right: 0;
+  width: 1px;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgba(220, 38, 38, 0.72) 32%,
+    rgba(248, 113, 113, 0.82) 50%,
+    rgba(220, 38, 38, 0.72) 68%,
+    transparent
+  );
+  box-shadow: 0 0 12px 1px rgba(220, 38, 38, 0.24);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.crimson-edge-both {
+  position: relative;
+}
+
+.crimson-edge-both::before,
+.crimson-edge-both::after {
+  content: "";
+  position: absolute;
+  top: 14%;
+  bottom: 14%;
+  width: 1px;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgba(220, 38, 38, 0.62) 32%,
+    rgba(248, 113, 113, 0.76) 50%,
+    rgba(220, 38, 38, 0.62) 68%,
+    transparent
+  );
+  box-shadow: 0 0 10px 1px rgba(220, 38, 38, 0.2);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.crimson-edge-both::before {
+  left: 0;
+}
+
+.crimson-edge-both::after {
+  right: 0;
+}
+
+@media (max-width: 767px) {
+  .crimson-edge-left::before,
+  .crimson-edge-right::after,
+  .crimson-edge-both::before,
+  .crimson-edge-both::after {
+    box-shadow: 0 0 6px 0 rgba(220, 38, 38, 0.16);
+  }
+}
+
+/* Neutral precision dot-grid stage inside Scene Viewport */
+.viewport-stage-grid {
+  background-color: rgba(5, 6, 9, 0.72);
+  background-image:
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.025) 0%, transparent 70%),
+    radial-gradient(rgba(255, 255, 255, 0.075) 1px, transparent 1px);
+  background-size: 100% 100%, 24px 24px;
+}
+
+/* Video-like output surface protection (applied strictly to Scene Viewport) */
+.viewport-video-surface {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Smooth, restrained studio UI transitions */
+@keyframes studioFadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes studioBackdropFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes studioDialogPop {
+  from {
+    opacity: 0;
+    transform: scale(0.975) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.studio-view-enter {
+  animation: studioFadeSlideUp 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.studio-dialog-backdrop {
+  animation: studioBackdropFade 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.studio-dialog-panel {
+  animation: studioDialogPop 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Clean slender scrollbars for Studio panels & CodeMirror */
+.studio-scroll::-webkit-scrollbar,
+.cm-scroller::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.studio-scroll::-webkit-scrollbar-track,
+.cm-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.studio-scroll::-webkit-scrollbar-thumb,
+.cm-scroller::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
+}
+
+.studio-scroll::-webkit-scrollbar-thumb:hover,
+.cm-scroller::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

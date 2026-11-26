@@ -1,0 +1,6 @@
+{
+  "name": "TRENVEDs",
+  "description": "AI-powered video creation studio — V1.0 UI/UX Foundation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
