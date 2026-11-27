@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -9,6 +9,7 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  Search,
   ShieldAlert,
   Sliders,
   Trash2,
@@ -27,10 +28,14 @@ import {
   discoverProviderModels,
   getPersistenceLabel,
   maskApiKey,
+  resolveProviderBaseUrl,
   testProviderConnection,
+  validateProviderBaseUrl,
 } from '../services/aiProviders';
 
 export type SettingsTab = 'preferences' | 'providers';
+
+type DiscoveryStatus = 'idle' | 'loading' | 'success' | 'error';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -65,21 +70,118 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [editingDraft, setEditingDraft] = useState<AiProviderConfig | null>(null);
   const [isKeyRevealed, setIsKeyRevealed] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
-  const [isDiscovering, setIsDiscovering] = useState(false);
+  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus>('idle');
   const [discoveryNotice, setDiscoveryNotice] = useState<string | null>(null);
+  const [modelFilter, setModelFilter] = useState('');
+
+  const discoverySeqRef = useRef(0);
+  const discoveryAbortRef = useRef<AbortController | null>(null);
+
+  const cancelOngoingDiscovery = useCallback(() => {
+    discoverySeqRef.current += 1;
+    discoveryAbortRef.current?.abort();
+    discoveryAbortRef.current = null;
+  }, []);
+
+  const runModelDiscovery = useCallback(
+    async (draftSnapshot: Pick<AiProviderConfig, 'id' | 'kind' | 'baseUrl' | 'apiKey'>) => {
+      const preset = PROVIDER_PRESETS[draftSnapshot.kind];
+      const resolvedUrl = resolveProviderBaseUrl(draftSnapshot);
+      const urlCheck = validateProviderBaseUrl(resolvedUrl);
+
+      if (!draftSnapshot.apiKey.trim()) {
+        cancelOngoingDiscovery();
+        setDiscoveryStatus('idle');
+        setDiscoveryNotice(null);
+        return;
+      }
+
+      if (preset.usesCustomEndpoint && !urlCheck.valid) {
+        cancelOngoingDiscovery();
+        setDiscoveryStatus('error');
+        setDiscoveryNotice(urlCheck.error ?? 'Enter a valid HTTPS endpoint URL first.');
+        return;
+      }
+
+      cancelOngoingDiscovery();
+      const requestSeq = discoverySeqRef.current;
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      discoveryAbortRef.current = controller;
+
+      setDiscoveryStatus('loading');
+      setDiscoveryNotice(`Retrieving available models from ${preset.label}...`);
+
+      const result = await discoverProviderModels(
+        {
+          kind: draftSnapshot.kind,
+          baseUrl: resolvedUrl,
+          apiKey: draftSnapshot.apiKey,
+        },
+        fetch,
+        controller?.signal
+      );
+
+      if (requestSeq !== discoverySeqRef.current || result.aborted) {
+        return;
+      }
+
+      if (result.error) {
+        setDiscoveryStatus('error');
+        setDiscoveryNotice(result.error);
+        return;
+      }
+
+      if (result.models.length === 0) {
+        setDiscoveryStatus('success');
+        setDiscoveryNotice(
+          `No compatible models were returned by ${preset.label}. Enter a model identifier manually below.`
+        );
+        setEditingDraft((prev) =>
+          prev && prev.id === draftSnapshot.id && prev.kind === draftSnapshot.kind
+            ? { ...prev, discoveredModels: [] }
+            : prev
+        );
+        return;
+      }
+
+      setDiscoveryStatus('success');
+      setDiscoveryNotice(`Loaded ${result.models.length} models from ${preset.label}.`);
+      setEditingDraft((prev) => {
+        if (!prev || prev.id !== draftSnapshot.id || prev.kind !== draftSnapshot.kind) {
+          return prev;
+        }
+        const currentModelValid =
+          prev.model.trim() !== '' && result.models.includes(prev.model.trim());
+        return {
+          ...prev,
+          discoveredModels: result.models,
+          model: currentModelValid ? prev.model.trim() : result.models[0],
+        };
+      });
+    },
+    [cancelOngoingDiscovery]
+  );
 
   useEffect(() => {
     if (isOpen) {
       setActiveTab(initialTab);
       setIsKeyRevealed(false);
-      setDiscoveryNotice(null);
+      setModelFilter('');
       if (initialTab === 'providers' && providers.length === 0) {
+        cancelOngoingDiscovery();
+        setDiscoveryStatus('idle');
+        setDiscoveryNotice(null);
         setEditingDraft(createEmptyProviderDraft('gemini'));
       } else {
+        cancelOngoingDiscovery();
+        setDiscoveryStatus('idle');
+        setDiscoveryNotice(null);
         setEditingDraft(null);
       }
+    } else {
+      cancelOngoingDiscovery();
     }
-  }, [isOpen, initialTab, providers.length]);
+  }, [isOpen, initialTab, providers.length, cancelOngoingDiscovery]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -92,38 +194,119 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
+  useEffect(() => {
+    return () => cancelOngoingDiscovery();
+  }, [cancelOngoingDiscovery]);
+
+  // Auto-discover models when the user enters/pastes an API key (and valid custom URL if applicable)
+  const draftId = editingDraft?.id ?? '';
+  const draftKind = editingDraft?.kind ?? 'gemini';
+  const draftBaseUrl = editingDraft?.baseUrl ?? '';
+  const draftApiKey = editingDraft?.apiKey ?? '';
+  const draftModelCount = editingDraft?.discoveredModels.length ?? 0;
+
+  useEffect(() => {
+    if (!isOpen || !draftId) return;
+    const trimmedKey = draftApiKey.trim();
+    if (!trimmedKey) {
+      cancelOngoingDiscovery();
+      setDiscoveryStatus('idle');
+      setDiscoveryNotice(null);
+      setEditingDraft((prev) =>
+        prev && prev.id === draftId && prev.discoveredModels.length > 0
+          ? { ...prev, discoveredModels: [] }
+          : prev
+      );
+      return;
+    }
+
+    if (trimmedKey.length < 8) return;
+    const preset = PROVIDER_PRESETS[draftKind];
+    if (preset.usesCustomEndpoint && !validateProviderBaseUrl(draftBaseUrl).valid) {
+      return;
+    }
+    if (draftModelCount > 0) return;
+
+    const timer = window.setTimeout(() => {
+      void runModelDiscovery({
+        id: draftId,
+        kind: draftKind,
+        baseUrl: draftBaseUrl,
+        apiKey: trimmedKey,
+      });
+    }, 450);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    isOpen,
+    draftId,
+    draftKind,
+    draftBaseUrl,
+    draftApiKey,
+    draftModelCount,
+    cancelOngoingDiscovery,
+    runModelDiscovery,
+  ]);
+
+  const filteredModels = useMemo(() => {
+    if (!editingDraft) return [];
+    const list = editingDraft.discoveredModels;
+    const query = modelFilter.trim().toLowerCase();
+    if (!query) return list;
+    return list.filter((m) => m.toLowerCase().includes(query));
+  }, [editingDraft, modelFilter]);
+
   if (!isOpen) return null;
 
   const handleStartNewProvider = () => {
+    cancelOngoingDiscovery();
     setIsKeyRevealed(false);
+    setDiscoveryStatus('idle');
     setDiscoveryNotice(null);
+    setModelFilter('');
     setEditingDraft(createEmptyProviderDraft('gemini'));
   };
 
   const handleEditProvider = (provider: AiProviderConfig) => {
+    cancelOngoingDiscovery();
     setIsKeyRevealed(false);
-    setDiscoveryNotice(null);
-    setEditingDraft({ ...provider });
+    setModelFilter('');
+    const normalized: AiProviderConfig = {
+      ...provider,
+      baseUrl: resolveProviderBaseUrl(provider),
+      discoveredModels: Array.isArray(provider.discoveredModels)
+        ? [...provider.discoveredModels]
+        : [],
+    };
+    setEditingDraft(normalized);
+    if (normalized.discoveredModels.length > 0) {
+      setDiscoveryStatus('success');
+      setDiscoveryNotice(
+        `Loaded ${normalized.discoveredModels.length} models from ${PROVIDER_PRESETS[normalized.kind].label}.`
+      );
+    } else {
+      setDiscoveryStatus('idle');
+      setDiscoveryNotice(null);
+    }
   };
 
   const handleChangeKind = (nextKind: ProviderKind) => {
-    if (!editingDraft) return;
+    if (!editingDraft || editingDraft.kind === nextKind) return;
+    cancelOngoingDiscovery();
     const prevPreset = PROVIDER_PRESETS[editingDraft.kind];
     const nextPreset = PROVIDER_PRESETS[nextKind];
     const shouldReplaceName =
       !editingDraft.name.trim() || editingDraft.name === prevPreset.label;
-    const shouldReplaceUrl =
-      !editingDraft.baseUrl.trim() || editingDraft.baseUrl === prevPreset.defaultBaseUrl;
-    const shouldReplaceModel =
-      !editingDraft.model.trim() || editingDraft.model === prevPreset.defaultModel;
 
+    setDiscoveryStatus('idle');
     setDiscoveryNotice(null);
+    setModelFilter('');
     setEditingDraft({
       ...editingDraft,
       kind: nextKind,
       name: shouldReplaceName ? nextPreset.label : editingDraft.name,
-      baseUrl: shouldReplaceUrl ? nextPreset.defaultBaseUrl : editingDraft.baseUrl,
-      model: shouldReplaceModel ? nextPreset.defaultModel : editingDraft.model,
+      baseUrl: nextPreset.usesCustomEndpoint ? '' : nextPreset.defaultBaseUrl,
+      model: '',
       discoveredModels: [],
       lastTestStatus: 'untested',
       lastTestMessage: undefined,
@@ -131,32 +314,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const handleDiscoverModels = async () => {
-    if (!editingDraft || isDiscovering) return;
-    setIsDiscovering(true);
-    setDiscoveryNotice(null);
-    const result = await discoverProviderModels(editingDraft);
-    setIsDiscovering(false);
-
-    if (result.error) {
-      setDiscoveryNotice(result.error);
-      return;
-    }
-
-    if (result.models.length === 0) {
-      setDiscoveryNotice('No compatible models returned; enter model ID manually.');
-      return;
-    }
-
-    setEditingDraft((prev) =>
-      prev
-        ? {
-            ...prev,
-            discoveredModels: result.models,
-            model: prev.model.trim() || result.models[0],
-          }
-        : null
-    );
-    setDiscoveryNotice(`Loaded ${result.models.length} models.`);
+    if (!editingDraft || discoveryStatus === 'loading') return;
+    await runModelDiscovery(editingDraft);
   };
 
   const handleTestConnection = async () => {
@@ -166,13 +325,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       prev ? { ...prev, lastTestStatus: 'testing', lastTestMessage: 'Testing connection...' } : null
     );
 
-    const result = await testProviderConnection(editingDraft);
+    const resolvedDraft: AiProviderConfig = {
+      ...editingDraft,
+      baseUrl: resolveProviderBaseUrl(editingDraft),
+    };
+    const result = await testProviderConnection(resolvedDraft);
     setIsTesting(false);
 
     setEditingDraft((prev) => {
-      if (!prev) return null;
+      if (!prev || prev.id !== resolvedDraft.id) return prev;
       const updated: AiProviderConfig = {
         ...prev,
+        baseUrl: resolvedDraft.baseUrl,
         lastTestStatus: result.status,
         lastTestMessage: result.message,
         lastTestedAt: result.testedAt,
@@ -181,7 +345,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             ? result.discoveredModels
             : prev.discoveredModels,
       };
-      // If editing an existing saved provider, update its tested state immediately
       if (providers.some((p) => p.id === updated.id)) {
         onSaveProvider(updated, false);
       }
@@ -192,15 +355,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleSubmitDraft = (event: React.FormEvent) => {
     event.preventDefault();
     if (!editingDraft) return;
+    const preset = PROVIDER_PRESETS[editingDraft.kind];
+    const resolvedUrl = resolveProviderBaseUrl(editingDraft);
+    if (preset.usesCustomEndpoint && !validateProviderBaseUrl(resolvedUrl).valid) {
+      return;
+    }
     const cleaned: AiProviderConfig = {
       ...editingDraft,
-      name: editingDraft.name.trim() || PROVIDER_PRESETS[editingDraft.kind].label,
-      baseUrl: editingDraft.baseUrl.trim().replace(/\/+$/, ''),
+      name: editingDraft.name.trim() || preset.label,
+      baseUrl: resolvedUrl,
       model: editingDraft.model.trim(),
       apiKey: editingDraft.apiKey.trim(),
     };
-    if (!cleaned.model || !cleaned.baseUrl) return;
+    if (!cleaned.model || !cleaned.baseUrl || !cleaned.apiKey) return;
     onSaveProvider(cleaned, providers.length === 0 || activeProviderId === cleaned.id);
+    cancelOngoingDiscovery();
     setEditingDraft(null);
     setIsKeyRevealed(false);
   };
@@ -510,7 +679,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               )}
 
               {/* Add / Edit Provider Form */}
-              {editingDraft && (
+              {editingDraft && (() => {
+                const activePreset = PROVIDER_PRESETS[editingDraft.kind];
+                const hasDiscoveredModels = editingDraft.discoveredModels.length > 0;
+                const showManualFallback =
+                  !activePreset.supportsModelDiscovery ||
+                  discoveryStatus === 'error' ||
+                  (discoveryStatus === 'success' && !hasDiscoveredModels) ||
+                  (!hasDiscoveredModels && editingDraft.model.trim() !== '');
+                const canRefreshModels =
+                  discoveryStatus !== 'loading' &&
+                  editingDraft.apiKey.trim().length > 0 &&
+                  (!activePreset.usesCustomEndpoint || validateProviderBaseUrl(editingDraft.baseUrl).valid);
+
+                return (
                 <form onSubmit={handleSubmitDraft} className="space-y-4">
                   <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
                     <h3 className="text-sm font-semibold text-white">
@@ -521,7 +703,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {providers.length > 0 && (
                       <button
                         type="button"
-                        onClick={() => setEditingDraft(null)}
+                        onClick={() => {
+                          cancelOngoingDiscovery();
+                          setEditingDraft(null);
+                        }}
                         className="text-xs text-zinc-400 hover:text-zinc-200"
                       >
                         Back to list
@@ -531,7 +716,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                   <div>
                     <label className="block text-xs font-medium text-zinc-300 mb-1.5">
-                      Provider Type
+                      Provider
                     </label>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                       {PROVIDER_KINDS.map((kind) => {
@@ -541,6 +726,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           <button
                             key={kind}
                             type="button"
+                            aria-pressed={selected}
                             onClick={() => handleChangeKind(kind)}
                             className={`h-9 rounded-lg border px-2 text-xs font-medium transition-colors truncate ${
                               selected
@@ -555,23 +741,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label htmlFor="provider-name-input" className="block text-xs font-medium text-zinc-300 mb-1">
-                        Display Name
-                      </label>
-                      <input
-                        id="provider-name-input"
-                        type="text"
-                        value={editingDraft.name}
-                        onChange={(e) =>
-                          setEditingDraft({ ...editingDraft, name: e.target.value })
-                        }
-                        placeholder="My Gemini Key"
-                        className="h-9 w-full rounded-lg border border-white/10 bg-black/45 px-3 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-red-500/60 focus:outline-none"
-                      />
-                    </div>
-
+                  {activePreset.usesCustomEndpoint && (
                     <div>
                       <label htmlFor="provider-url-input" className="block text-xs font-medium text-zinc-300 mb-1">
                         Endpoint Base URL
@@ -581,18 +751,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         type="url"
                         required
                         value={editingDraft.baseUrl}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          cancelOngoingDiscovery();
+                          setDiscoveryStatus('idle');
+                          setDiscoveryNotice(null);
                           setEditingDraft({
                             ...editingDraft,
                             baseUrl: e.target.value,
+                            discoveredModels: [],
                             lastTestStatus: 'untested',
                             lastTestMessage: undefined,
-                          })
-                        }
+                          });
+                        }}
+                        placeholder={activePreset.urlPlaceholder ?? 'https://api.example.com/v1'}
                         className="h-9 w-full rounded-lg border border-white/10 bg-black/45 px-3 font-mono text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-red-500/60 focus:outline-none"
                       />
                     </div>
-                  </div>
+                  )}
 
                   <div>
                     <label htmlFor="provider-apikey-input" className="block text-xs font-medium text-zinc-300 mb-1">
@@ -606,15 +781,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         autoComplete="off"
                         spellCheck={false}
                         value={editingDraft.apiKey}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          cancelOngoingDiscovery();
+                          setDiscoveryStatus('idle');
+                          setDiscoveryNotice(null);
                           setEditingDraft({
                             ...editingDraft,
                             apiKey: e.target.value,
+                            discoveredModels: [],
                             lastTestStatus: 'untested',
                             lastTestMessage: undefined,
-                          })
-                        }
-                        placeholder={PROVIDER_PRESETS[editingDraft.kind].keyPlaceholder}
+                          });
+                        }}
+                        placeholder={activePreset.keyPlaceholder}
                         className="h-9 flex-1 rounded-lg border border-white/10 bg-black/45 px-3 font-mono text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-red-500/60 focus:outline-none"
                       />
                       <button
@@ -630,74 +809,178 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                      <label htmlFor="provider-model-input" className="block text-xs font-medium text-zinc-300">
-                        Model ID
+                      <label
+                        htmlFor={showManualFallback ? 'provider-model-input' : 'provider-model-filter'}
+                        className="block text-xs font-medium text-zinc-300"
+                      >
+                        Model
                       </label>
-                      {PROVIDER_PRESETS[editingDraft.kind].supportsModelDiscovery && (
+                      {activePreset.supportsModelDiscovery && (
                         <button
                           type="button"
                           onClick={handleDiscoverModels}
-                          disabled={isDiscovering || !editingDraft.apiKey.trim()}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium text-red-300 hover:text-red-200 disabled:opacity-40"
+                          disabled={!canRefreshModels}
+                          className="inline-flex items-center gap-1.5 text-[11px] font-medium text-red-300 hover:text-red-200 disabled:opacity-40"
                         >
-                          <RefreshCw className={`h-3 w-3 ${isDiscovering ? 'animate-spin' : ''}`} />
-                          <span>{isDiscovering ? 'Fetching models...' : 'Fetch Models'}</span>
+                          <RefreshCw
+                            className={`h-3 w-3 ${discoveryStatus === 'loading' ? 'animate-spin' : ''}`}
+                          />
+                          <span>
+                            {discoveryStatus === 'loading' ? 'Refreshing...' : 'Refresh Models'}
+                          </span>
                         </button>
                       )}
                     </div>
 
-                    <input
-                      id="provider-model-input"
-                      type="text"
-                      required
-                      value={editingDraft.model}
-                      onChange={(e) =>
-                        setEditingDraft({
-                          ...editingDraft,
-                          model: e.target.value,
-                          lastTestStatus: 'untested',
-                          lastTestMessage: undefined,
-                        })
-                      }
-                      placeholder={PROVIDER_PRESETS[editingDraft.kind].defaultModel}
-                      className="h-9 w-full rounded-lg border border-white/10 bg-black/45 px-3 font-mono text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-red-500/60 focus:outline-none"
-                    />
-
-                    {(editingDraft.discoveredModels.length > 0 ||
-                      PROVIDER_PRESETS[editingDraft.kind].suggestedModels.length > 0) && (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-[10px] text-zinc-500">
-                          {editingDraft.discoveredModels.length > 0 ? 'Available:' : 'Common:'}
-                        </span>
-                        {(editingDraft.discoveredModels.length > 0
-                          ? editingDraft.discoveredModels.slice(0, 8)
-                          : PROVIDER_PRESETS[editingDraft.kind].suggestedModels
-                        ).map((modelId) => (
-                          <button
-                            key={modelId}
-                            type="button"
-                            onClick={() =>
-                              setEditingDraft({
-                                ...editingDraft,
-                                model: modelId,
-                                lastTestStatus: 'untested',
-                                lastTestMessage: undefined,
-                              })
-                            }
-                            className={`rounded border px-2 py-0.5 font-mono text-[10px] transition-colors ${
-                              editingDraft.model === modelId
-                                ? 'border-red-500/50 bg-red-600/20 text-white'
-                                : 'border-white/10 bg-white/[0.03] text-zinc-400 hover:text-zinc-200'
-                            }`}
-                          >
-                            {modelId}
-                          </button>
-                        ))}
+                    {/* Discovery Status Indicator */}
+                    {discoveryStatus === 'loading' && (
+                      <div
+                        data-testid="model-discovery-status"
+                        data-status="loading"
+                        className="flex items-center gap-2 rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-xs text-zinc-300"
+                      >
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-red-400" />
+                        <span>{discoveryNotice ?? 'Retrieving available models...'}</span>
                       </div>
                     )}
 
-                    {discoveryNotice && (
-                      <p className="text-[11px] text-zinc-400">{discoveryNotice}</p>
+                    {discoveryStatus === 'error' && discoveryNotice && (
+                      <div
+                        data-testid="model-discovery-status"
+                        data-status="error"
+                        className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-600/10 px-3 py-2 text-xs text-red-200"
+                      >
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
+                        <span className="break-words">{discoveryNotice}</span>
+                      </div>
+                    )}
+
+                    {discoveryStatus === 'success' && discoveryNotice && (
+                      <div
+                        data-testid="model-discovery-status"
+                        data-status="success"
+                        className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-1.5 text-[11px] ${
+                          hasDiscoveredModels
+                            ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200'
+                            : 'border-amber-500/35 bg-amber-500/10 text-amber-200'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          {hasDiscoveredModels ? (
+                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                          ) : (
+                            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                          )}
+                          <span className="truncate">{discoveryNotice}</span>
+                        </span>
+                        {editingDraft.model && (
+                          <span className="font-mono text-[10px] text-zinc-200 truncate max-w-[45%]">
+                            {editingDraft.model}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Complete Browsable Model List from Provider API */}
+                    {hasDiscoveredModels && (
+                      <div className="rounded-xl border border-white/10 bg-black/40 overflow-hidden">
+                        <div className="flex items-center gap-2 border-b border-white/10 px-2.5 py-1.5 bg-white/[0.02]">
+                          <Search className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                          <input
+                            id="provider-model-filter"
+                            type="search"
+                            value={modelFilter}
+                            onChange={(e) => setModelFilter(e.target.value)}
+                            placeholder={`Browse all ${editingDraft.discoveredModels.length} models...`}
+                            aria-label="Filter available models"
+                            className="h-7 w-full bg-transparent text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
+                          />
+                          <span className="shrink-0 font-mono text-[10px] text-zinc-500 tabular-nums">
+                            {filteredModels.length}/{editingDraft.discoveredModels.length}
+                          </span>
+                        </div>
+
+                        <div
+                          role="listbox"
+                          aria-label="Available models"
+                          data-testid="discovered-model-list"
+                          className="studio-scroll max-h-44 overflow-y-auto p-1.5 space-y-0.5"
+                        >
+                          {filteredModels.length === 0 ? (
+                            <p className="px-2.5 py-3 text-center text-xs text-zinc-500">
+                              No models match "{modelFilter}".
+                            </p>
+                          ) : (
+                            filteredModels.map((modelId) => {
+                              const selected = editingDraft.model === modelId;
+                              return (
+                                <button
+                                  key={modelId}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={selected}
+                                  onClick={() =>
+                                    setEditingDraft({
+                                      ...editingDraft,
+                                      model: modelId,
+                                      lastTestStatus: 'untested',
+                                      lastTestMessage: undefined,
+                                    })
+                                  }
+                                  className={`flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left font-mono text-xs transition-colors ${
+                                    selected
+                                      ? 'border border-red-500/50 bg-red-600/20 text-white'
+                                      : 'border border-transparent text-zinc-300 hover:bg-white/[0.06] hover:text-white'
+                                  }`}
+                                >
+                                  <span className="truncate">{modelId}</span>
+                                  {selected && <Check className="h-3.5 w-3.5 shrink-0 text-red-400" />}
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Idle Prompt before API key is entered */}
+                    {!hasDiscoveredModels &&
+                      discoveryStatus === 'idle' &&
+                      !showManualFallback && (
+                        <div
+                          data-testid="model-discovery-status"
+                          data-status="idle"
+                          className="rounded-lg border border-dashed border-white/10 bg-black/25 px-3 py-2.5 text-xs text-zinc-400"
+                        >
+                          Enter your API key above to retrieve the full list of available models from{' '}
+                          {activePreset.label}.
+                        </div>
+                      )}
+
+                    {/* Manual Model Identifier Fallback (only when discovery fails/unsupported or returns empty) */}
+                    {showManualFallback && (
+                      <div className="space-y-1">
+                        <input
+                          id="provider-model-input"
+                          type="text"
+                          required
+                          value={editingDraft.model}
+                          onChange={(e) =>
+                            setEditingDraft({
+                              ...editingDraft,
+                              model: e.target.value,
+                              lastTestStatus: 'untested',
+                              lastTestMessage: undefined,
+                            })
+                          }
+                          placeholder="Enter model identifier manually"
+                          aria-label="Manual model identifier"
+                          className="h-9 w-full rounded-lg border border-white/10 bg-black/45 px-3 font-mono text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-red-500/60 focus:outline-none"
+                        />
+                        <p className="text-[11px] text-zinc-500">
+                          Manual model entry fallback active. Refresh models after fixing key or endpoint if needed.
+                        </p>
+                      </div>
                     )}
                   </div>
 
@@ -799,7 +1082,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       )}
                       <button
                         type="submit"
-                        disabled={!editingDraft.apiKey.trim() || !editingDraft.model.trim() || !editingDraft.baseUrl.trim()}
+                        disabled={
+                          !editingDraft.apiKey.trim() ||
+                          !editingDraft.model.trim() ||
+                          (activePreset.usesCustomEndpoint &&
+                            !validateProviderBaseUrl(editingDraft.baseUrl).valid)
+                        }
                         className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-red-600 px-4 text-xs font-medium text-white transition-colors hover:bg-red-500 disabled:opacity-40"
                       >
                         <Check className="h-3.5 w-3.5" />
@@ -808,7 +1096,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </div>
                   </div>
                 </form>
-              )}
+                );
+              })()}
             </div>
           )}
         </div>

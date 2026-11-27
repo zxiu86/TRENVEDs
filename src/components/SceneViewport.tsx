@@ -72,8 +72,16 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
     width: 640,
     height: 440,
   });
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
+  const [isFallbackFullscreen, setIsFallbackFullscreen] = useState(false);
   const [fullscreenNotice, setFullscreenNotice] = useState<string | null>(null);
+
+  const isFullscreen = isNativeFullscreen || isFallbackFullscreen;
+
+  const getFullscreenElement = (): Element | null => {
+    const doc = document as Document & { webkitFullscreenElement?: Element | null };
+    return document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+  };
 
   useEffect(() => {
     const stageEl = stageRef.current;
@@ -95,17 +103,28 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
     };
 
     updateBounds();
+    const rafId = window.requestAnimationFrame(() => {
+      updateBounds();
+    });
 
     if (typeof ResizeObserver !== 'undefined') {
       const observer = new ResizeObserver(() => {
         updateBounds();
       });
       observer.observe(stageEl);
-      return () => observer.disconnect();
+      window.addEventListener('resize', updateBounds);
+      return () => {
+        window.cancelAnimationFrame(rafId);
+        observer.disconnect();
+        window.removeEventListener('resize', updateBounds);
+      };
     }
 
     window.addEventListener('resize', updateBounds);
-    return () => window.removeEventListener('resize', updateBounds);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', updateBounds);
+    };
   }, [isFullscreen]);
 
   // Listen strictly to messages originating from our sandboxed scene iframe
@@ -151,13 +170,39 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
 
   useEffect(() => {
     const handleFullscreenChange = () => {
-      const active = document.fullscreenElement === fullscreenContainerRef.current;
-      setIsFullscreen(active);
+      const active = getFullscreenElement() === fullscreenContainerRef.current;
+      setIsNativeFullscreen(active);
+      if (active) {
+        setIsFallbackFullscreen(false);
+      }
+    };
+
+    const handleFullscreenError = () => {
+      setIsNativeFullscreen(false);
     };
 
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('fullscreenerror', handleFullscreenError);
+    document.addEventListener('webkitfullscreenerror', handleFullscreenError);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('fullscreenerror', handleFullscreenError);
+      document.removeEventListener('webkitfullscreenerror', handleFullscreenError);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!isFallbackFullscreen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsFallbackFullscreen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFallbackFullscreen]);
 
   useEffect(() => {
     if (!fullscreenNotice) return;
@@ -166,25 +211,47 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
   }, [fullscreenNotice]);
 
   const handleToggleFullscreen = useCallback(async () => {
-    const container = fullscreenContainerRef.current;
+    const container = fullscreenContainerRef.current as
+      | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
+      | null;
     if (!container) return;
 
+    const doc = document as Document & {
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+
     try {
-      if (document.fullscreenElement === container) {
-        await document.exitFullscreen();
+      if (getFullscreenElement() === container) {
+        if (typeof document.exitFullscreen === 'function') {
+          await document.exitFullscreen();
+        } else if (typeof doc.webkitExitFullscreen === 'function') {
+          await doc.webkitExitFullscreen();
+        }
+        setIsNativeFullscreen(false);
         return;
       }
 
-      if (typeof container.requestFullscreen !== 'function') {
-        setFullscreenNotice('Fullscreen is not supported in this browser environment.');
+      if (isFallbackFullscreen) {
+        setIsFallbackFullscreen(false);
         return;
       }
 
-      await container.requestFullscreen();
+      if (typeof container.requestFullscreen === 'function') {
+        await container.requestFullscreen();
+        return;
+      }
+
+      if (typeof container.webkitRequestFullscreen === 'function') {
+        await container.webkitRequestFullscreen();
+        return;
+      }
+
+      // Clean viewport-filling fallback when browser/iframe blocks native Fullscreen API
+      setIsFallbackFullscreen(true);
     } catch {
-      setFullscreenNotice('Fullscreen could not be activated by the browser.');
+      setIsFallbackFullscreen(true);
     }
-  }, []);
+  }, [isFallbackFullscreen]);
 
   const frameSize = calculateContainedFrameSize(
     stageBounds.width,
@@ -200,7 +267,11 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
   return (
     <section
       aria-label="Scene Viewport"
-      className="studio-glass flex h-full min-h-0 flex-col overflow-hidden rounded-xl transition-all duration-200 ease-out"
+      className={
+        isFallbackFullscreen
+          ? 'flex h-full min-h-0 flex-col rounded-xl'
+          : 'studio-glass flex h-full min-h-0 flex-col overflow-hidden rounded-xl transition-colors duration-200 ease-out'
+      }
     >
       {/* Compact Viewport Header */}
       <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] px-3.5">
@@ -251,19 +322,23 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
         data-testid="viewport-presentation-root"
         data-fullscreen={isFullscreen ? 'true' : 'false'}
         onContextMenu={(event) => event.preventDefault()}
-        className={`viewport-video-surface relative flex flex-1 min-h-0 flex-col overflow-hidden ${
-          isFullscreen ? 'bg-[#040406] h-screen w-screen' : ''
+        className={`viewport-video-surface flex flex-col overflow-hidden ${
+          isFallbackFullscreen
+            ? 'fixed inset-0 z-[60] h-dvh w-screen bg-[#040406]'
+            : isNativeFullscreen
+              ? 'relative h-full w-full bg-[#040406]'
+              : 'relative flex-1 min-h-0'
         }`}
       >
         {/* Central Dark Neutral Canvas Stage */}
         <div
           ref={stageRef}
           data-testid="scene-viewport-stage"
-          className={`viewport-stage-grid studio-scroll relative flex-1 min-h-0 overflow-auto flex items-center justify-center ${
-            isFullscreen ? 'p-6 sm:p-10 pb-24' : 'p-4 sm:p-6'
+          className={`viewport-stage-grid studio-scroll relative flex-1 min-h-0 overflow-auto flex ${
+            isFullscreen ? 'p-4 sm:p-8' : 'p-4 sm:p-6'
           }`}
         >
-          {/* Contained Video Frame (proportional pixel dimensions) */}
+          {/* Contained Video Frame (proportional pixel dimensions, m-auto prevents flex overflow clipping) */}
           <div
             data-testid="viewport-frame"
             data-aspect-ratio={aspectRatio}
@@ -275,7 +350,7 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
               width: `${frameSize.width}px`,
               height: `${frameSize.height}px`,
             }}
-            className="viewport-video-surface crimson-edge-left crimson-edge-right relative shrink-0 flex items-center justify-center overflow-hidden rounded-lg border border-white/15 bg-[#08090D] shadow-[0_32px_90px_-24px_rgba(0,0,0,0.96),inset_0_1px_0_rgba(255,255,255,0.08)]"
+            className="viewport-video-surface crimson-edge-left crimson-edge-right relative m-auto shrink-0 flex items-center justify-center overflow-hidden rounded-lg border border-white/15 bg-[#08090D] shadow-[0_32px_90px_-24px_rgba(0,0,0,0.96),inset_0_1px_0_rgba(255,255,255,0.08)]"
           >
             {hasCompiledScene && compiledBundle ? (
               <iframe
@@ -348,37 +423,51 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
           </div>
         </div>
 
-        {/* Minimal Floating HUD shown ONLY while Browser Fullscreen is active */}
+        {/* Dedicated Non-Overlapping Bottom HUD shown ONLY while Fullscreen is active */}
         {isFullscreen && (
-          <div
-            data-testid="fullscreen-hud"
-            className="studio-glass-elevated studio-dialog-panel absolute bottom-5 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-xl px-4 py-2 text-xs"
-          >
-            <span className="font-mono tabular-nums text-zinc-300 whitespace-nowrap">
-              {aspectRatio} · {spec.resolution}
-            </span>
-            <span aria-hidden="true" className="h-3.5 w-px bg-white/15" />
-            <button
-              type="button"
-              onClick={onToggleGuides}
-              aria-pressed={showGuides}
-              className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
-                showGuides
-                  ? 'border-red-500/45 bg-red-600/20 text-white'
-                  : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:text-white'
-              }`}
+          <div className="shrink-0 flex items-center justify-center bg-[#040406] px-3 pb-4 pt-1">
+            <div
+              data-testid="fullscreen-hud"
+              className="studio-glass-elevated studio-dialog-panel flex max-w-full flex-wrap items-center justify-center gap-2 sm:gap-3 rounded-xl px-3 sm:px-4 py-2 text-xs"
             >
-              <Grid className="h-3.5 w-3.5" />
-              <span>Guides</span>
-            </button>
-            <button
-              type="button"
-              onClick={handleToggleFullscreen}
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-red-600 px-3 text-xs font-medium text-white transition-colors hover:bg-red-500 whitespace-nowrap"
-            >
-              <Minimize2 className="h-3.5 w-3.5" />
-              <span>Exit Fullscreen</span>
-            </button>
+              <span className="font-mono tabular-nums text-zinc-300 whitespace-nowrap">
+                {aspectRatio} · {spec.resolution}
+              </span>
+              <span aria-hidden="true" className="hidden sm:inline h-3.5 w-px bg-white/15" />
+              <div className="flex items-center gap-2">
+                {hasCompiledScene && (
+                  <button
+                    type="button"
+                    onClick={onReloadScene}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-xs font-medium text-zinc-300 transition-colors hover:border-red-500/40 hover:text-white whitespace-nowrap"
+                  >
+                    <RotateCw className="h-3.5 w-3.5" />
+                    <span>Replay</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onToggleGuides}
+                  aria-pressed={showGuides}
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
+                    showGuides
+                      ? 'border-red-500/45 bg-red-600/20 text-white'
+                      : 'border-white/10 bg-white/[0.04] text-zinc-300 hover:text-white'
+                  }`}
+                >
+                  <Grid className="h-3.5 w-3.5" />
+                  <span>Guides</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleToggleFullscreen}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-red-600 px-3 text-xs font-medium text-white transition-colors hover:bg-red-500 whitespace-nowrap"
+                >
+                  <Minimize2 className="h-3.5 w-3.5" />
+                  <span>Exit Fullscreen</span>
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

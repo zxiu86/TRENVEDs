@@ -19,7 +19,9 @@ import {
 import { compileSceneBundle, resolveExternalPackageUrl } from '../runtime/sceneBundler';
 import {
   classifyProviderError,
+  discoverProviderModels,
   maskApiKey,
+  resolveProviderBaseUrl,
   validateProviderBaseUrl,
 } from '../services/aiProviders';
 import { parseAiBrainResponse } from '../services/aiBrain';
@@ -192,9 +194,27 @@ test('resolveExternalPackageUrl rejects unsafe or malformed specifiers and pins 
   assert.equal(resolveExternalPackageUrl('javascript:alert(1)').url, null);
 });
 
-test('aiProviders helpers mask keys, validate endpoint URLs, and classify errors honestly', () => {
+test('aiProviders helpers mask keys, resolve official endpoints, validate custom URLs, and classify errors', () => {
   assert.equal(maskApiKey('AIzaSyA1234567890XYZW'), 'AIza••••••XYZW');
   assert.equal(maskApiKey('short'), '••••••••');
+
+  assert.equal(
+    resolveProviderBaseUrl({ kind: 'gemini', baseUrl: '' }),
+    'https://generativelanguage.googleapis.com/v1beta'
+  );
+  assert.equal(
+    resolveProviderBaseUrl({ kind: 'openai', baseUrl: 'https://custom.invalid' }),
+    'https://api.openai.com/v1'
+  );
+  assert.equal(
+    resolveProviderBaseUrl({ kind: 'anthropic', baseUrl: '' }),
+    'https://api.anthropic.com/v1'
+  );
+  assert.equal(
+    resolveProviderBaseUrl({ kind: 'openai-compatible', baseUrl: 'https://openrouter.ai/api/v1/' }),
+    'https://openrouter.ai/api/v1'
+  );
+
   assert.equal(validateProviderBaseUrl('https://generativelanguage.googleapis.com/v1beta').valid, true);
   assert.equal(validateProviderBaseUrl('http://localhost:11434/v1').valid, true);
   assert.equal(validateProviderBaseUrl('http://example.com/v1').valid, false);
@@ -203,6 +223,100 @@ test('aiProviders helpers mask keys, validate endpoint URLs, and classify errors
   assert.match(classifyProviderError(401, '{}', 'openai'), /Invalid or unauthorized API key/);
   assert.match(classifyProviderError(429, '{}', 'gemini'), /Rate limit or quota exceeded/);
   assert.match(classifyProviderError(404, '{"error":{"message":"Model missing"}}', 'gemini'), /Model missing/);
+  assert.match(
+    classifyProviderError(400, '{"error":{"message":"Model gpt-99 does not exist"}}', 'openai'),
+    /Unsupported or unavailable model/
+  );
+});
+
+test('discoverProviderModels retrieves full untruncated paginated lists across Gemini, OpenAI, and Anthropic', async () => {
+  // Gemini with 2 pages and method filtering
+  const geminiUrls: string[] = [];
+  const geminiFetch: typeof fetch = async (input) => {
+    const url = String(input);
+    geminiUrls.push(url);
+    if (!url.includes('pageToken=')) {
+      return new Response(
+        JSON.stringify({
+          models: [
+            { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
+            { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] },
+          ],
+          nextPageToken: 'page2',
+        }),
+        { status: 200 }
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        models: [
+          { name: 'models/gemini-2.5-pro', supportedGenerationMethods: ['generateContent'] },
+        ],
+      }),
+      { status: 200 }
+    );
+  };
+
+  const geminiResult = await discoverProviderModels(
+    { kind: 'gemini', baseUrl: '', apiKey: 'AIzaTestKey12345' },
+    geminiFetch
+  );
+  assert.equal(geminiUrls.length, 2);
+  assert.ok(geminiUrls[0].startsWith('https://generativelanguage.googleapis.com/v1beta/models'));
+  assert.deepEqual(geminiResult.models, ['gemini-2.5-flash', 'gemini-2.5-pro']);
+
+  // OpenAI returns >60 models with zero truncation
+  const openAiItems = Array.from({ length: 85 }, (_, idx) => ({
+    id: `model-${String(idx + 1).padStart(3, '0')}`,
+  }));
+  const openAiFetch: typeof fetch = async () =>
+    new Response(JSON.stringify({ data: openAiItems }), { status: 200 });
+  const openAiResult = await discoverProviderModels(
+    { kind: 'openai', baseUrl: '', apiKey: 'sk-test-123456' },
+    openAiFetch
+  );
+  assert.equal(openAiResult.models.length, 85);
+
+  // Anthropic official /v1/models with pagination & invalid-key classification
+  const anthropicFetch: typeof fetch = async (input) => {
+    const url = String(input);
+    if (!url.includes('after_id=')) {
+      return new Response(
+        JSON.stringify({
+          data: [{ id: 'claude-sonnet-4-20250514' }],
+          has_more: true,
+          last_id: 'claude-sonnet-4-20250514',
+        }),
+        { status: 200 }
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        data: [{ id: 'claude-3-5-haiku-20241022' }],
+        has_more: false,
+      }),
+      { status: 200 }
+    );
+  };
+  const anthropicResult = await discoverProviderModels(
+    { kind: 'anthropic', baseUrl: '', apiKey: 'sk-ant-test-123456' },
+    anthropicFetch
+  );
+  assert.deepEqual(anthropicResult.models, [
+    'claude-sonnet-4-20250514',
+    'claude-3-5-haiku-20241022',
+  ]);
+
+  // Abort cleanly marks aborted: true without returning stale error
+  const abortController = new AbortController();
+  abortController.abort();
+  const abortedResult = await discoverProviderModels(
+    { kind: 'openai', baseUrl: '', apiKey: 'sk-test-123456' },
+    openAiFetch,
+    abortController.signal
+  );
+  assert.equal(abortedResult.aborted, true);
+  assert.deepEqual(abortedResult.models, []);
 });
 
 test('parseAiBrainResponse extracts fenced JSON and normalizes operations', () => {

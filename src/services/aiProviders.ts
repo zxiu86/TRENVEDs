@@ -13,8 +13,9 @@ export interface ProviderPreset {
   kind: ProviderKind;
   label: string;
   defaultBaseUrl: string;
+  usesCustomEndpoint: boolean;
+  urlPlaceholder?: string;
   defaultModel: string;
-  suggestedModels: string[];
   supportsModelDiscovery: boolean;
   keyPlaceholder: string;
 }
@@ -24,8 +25,8 @@ export const PROVIDER_PRESETS: Record<ProviderKind, ProviderPreset> = {
     kind: 'gemini',
     label: 'Google Gemini',
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-    defaultModel: 'gemini-2.5-flash',
-    suggestedModels: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3-flash-preview'],
+    usesCustomEndpoint: false,
+    defaultModel: '',
     supportsModelDiscovery: true,
     keyPlaceholder: 'AIza...',
   },
@@ -33,8 +34,8 @@ export const PROVIDER_PRESETS: Record<ProviderKind, ProviderPreset> = {
     kind: 'openai',
     label: 'OpenAI',
     defaultBaseUrl: 'https://api.openai.com/v1',
-    defaultModel: 'gpt-4.1-mini',
-    suggestedModels: ['gpt-4.1-mini', 'gpt-4.1', 'gpt-4o-mini'],
+    usesCustomEndpoint: false,
+    defaultModel: '',
     supportsModelDiscovery: true,
     keyPlaceholder: 'sk-...',
   },
@@ -42,23 +43,20 @@ export const PROVIDER_PRESETS: Record<ProviderKind, ProviderPreset> = {
     kind: 'anthropic',
     label: 'Anthropic Claude',
     defaultBaseUrl: 'https://api.anthropic.com/v1',
-    defaultModel: 'claude-sonnet-4-20250514',
-    suggestedModels: [
-      'claude-sonnet-4-20250514',
-      'claude-3-7-sonnet-20250219',
-      'claude-3-5-haiku-20241022',
-    ],
-    supportsModelDiscovery: false,
+    usesCustomEndpoint: false,
+    defaultModel: '',
+    supportsModelDiscovery: true,
     keyPlaceholder: 'sk-ant-...',
   },
   'openai-compatible': {
     kind: 'openai-compatible',
     label: 'OpenAI-Compatible',
-    defaultBaseUrl: 'https://openrouter.ai/api/v1',
-    defaultModel: 'openai/gpt-4o-mini',
-    suggestedModels: ['openai/gpt-4o-mini', 'anthropic/claude-sonnet-4', 'google/gemini-2.5-flash'],
+    defaultBaseUrl: '',
+    usesCustomEndpoint: true,
+    urlPlaceholder: 'https://openrouter.ai/api/v1',
+    defaultModel: '',
     supportsModelDiscovery: true,
-    keyPlaceholder: 'sk-or-... or provider token',
+    keyPlaceholder: 'Provider API key',
   },
 };
 
@@ -67,6 +65,12 @@ export interface ConnectionTestResult {
   message: string;
   discoveredModels?: string[];
   testedAt: string;
+}
+
+export interface ModelDiscoveryResult {
+  models: string[];
+  error?: string;
+  aborted?: boolean;
 }
 
 export interface ProviderChatMessage {
@@ -81,6 +85,16 @@ export interface ProviderCompletionRequest {
   maxTokens?: number;
   expectJson?: boolean;
   signal?: AbortSignal;
+}
+
+export function resolveProviderBaseUrl(
+  provider: Pick<AiProviderConfig, 'kind' | 'baseUrl'>
+): string {
+  const preset = PROVIDER_PRESETS[provider.kind];
+  if (!preset.usesCustomEndpoint) {
+    return preset.defaultBaseUrl;
+  }
+  return provider.baseUrl.trim().replace(/\/+$/, '');
 }
 
 export function maskApiKey(apiKey: string): string {
@@ -120,8 +134,8 @@ export function createEmptyProviderDraft(kind: ProviderKind = 'gemini'): AiProvi
     id: `prov_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
     name: preset.label,
     kind,
-    baseUrl: preset.defaultBaseUrl,
-    model: preset.defaultModel,
+    baseUrl: preset.usesCustomEndpoint ? '' : preset.defaultBaseUrl,
+    model: '',
     apiKey: '',
     persistence: 'session',
     discoveredModels: [],
@@ -140,6 +154,21 @@ function safeReadJson<T>(storage: Storage | undefined, key: string): T | null {
   }
 }
 
+function normalizeLoadedProvider(
+  item: AiProviderConfig,
+  persistence: CredentialPersistence
+): AiProviderConfig {
+  const kind: ProviderKind =
+    item.kind && item.kind in PROVIDER_PRESETS ? item.kind : 'gemini';
+  return {
+    ...item,
+    kind,
+    baseUrl: resolveProviderBaseUrl({ kind, baseUrl: item.baseUrl ?? '' }),
+    discoveredModels: Array.isArray(item.discoveredModels) ? item.discoveredModels : [],
+    persistence,
+  };
+}
+
 export function loadStoredProviders(): {
   providers: AiProviderConfig[];
   activeProviderId: string | null;
@@ -156,12 +185,12 @@ export function loadStoredProviders(): {
   const mergedMap = new Map<string, AiProviderConfig>();
   for (const item of localItems) {
     if (item && typeof item.id === 'string') {
-      mergedMap.set(item.id, { ...item, persistence: 'local' });
+      mergedMap.set(item.id, normalizeLoadedProvider(item, 'local'));
     }
   }
   for (const item of sessionItems) {
     if (item && typeof item.id === 'string') {
-      mergedMap.set(item.id, { ...item, persistence: 'session' });
+      mergedMap.set(item.id, normalizeLoadedProvider(item, 'session'));
     }
   }
 
@@ -224,7 +253,7 @@ export function classifyProviderError(
   let detail = '';
   try {
     const parsed = JSON.parse(bodyText) as {
-      error?: { message?: string; status?: string; type?: string };
+      error?: { message?: string; status?: string; type?: string; code?: string };
       message?: string;
     };
     detail = parsed?.error?.message ?? parsed?.message ?? '';
@@ -240,7 +269,7 @@ export function classifyProviderError(
   if (status === 404) {
     return detail
       ? `Model or endpoint not found (404): ${detail}`
-      : 'Configured model or API endpoint was not found (404).';
+      : 'Selected model or API endpoint was not found or is unsupported (404).';
   }
   if (status === 429) {
     return detail
@@ -250,6 +279,9 @@ export function classifyProviderError(
   if (status >= 400 && status < 500) {
     if (kind === 'gemini' && /api key not valid/i.test(detail)) {
       return `Invalid Gemini API key: ${detail}`;
+    }
+    if (/not supported|unsupported|does not exist|invalid model|model.+not found/i.test(detail)) {
+      return `Unsupported or unavailable model (${status}): ${detail}`;
     }
     return detail ? `Provider rejected request (${status}): ${detail}` : `Invalid request (${status}).`;
   }
@@ -261,62 +293,135 @@ export function classifyProviderError(
   return detail || `Unexpected HTTP status ${status}.`;
 }
 
+function deduplicateStrings(items: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of items) {
+    const clean = item.trim();
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      result.push(clean);
+    }
+  }
+  return result;
+}
+
 export async function discoverProviderModels(
   provider: Pick<AiProviderConfig, 'kind' | 'baseUrl' | 'apiKey'>,
-  fetcher: typeof fetch = fetch
-): Promise<{ models: string[]; error?: string }> {
-  const urlCheck = validateProviderBaseUrl(provider.baseUrl);
+  fetcher: typeof fetch = fetch,
+  externalSignal?: AbortSignal
+): Promise<ModelDiscoveryResult> {
+  const resolvedBaseUrl = resolveProviderBaseUrl(provider);
+  const urlCheck = validateProviderBaseUrl(resolvedBaseUrl);
   if (!urlCheck.valid) {
     return { models: [], error: urlCheck.error };
   }
-  if (!provider.apiKey.trim()) {
-    return { models: [], error: 'Enter an API key first to fetch models.' };
-  }
-
-  if (provider.kind === 'anthropic') {
-    return {
-      models: PROVIDER_PRESETS.anthropic.suggestedModels,
-    };
+  const apiKey = provider.apiKey.trim();
+  if (!apiKey) {
+    return { models: [], error: 'Enter an API key first to load available models.' };
   }
 
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), 9000) : null;
+  let timedOut = false;
+  const onExternalAbort = () => controller?.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      return { models: [], aborted: true };
+    }
+    externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+  const timer = controller
+    ? setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, 12000)
+    : null;
 
   try {
     if (provider.kind === 'gemini') {
-      const response = await fetcher(`${urlCheck.normalized}/models?pageSize=50`, {
-        method: 'GET',
-        headers: {
-          'x-goog-api-key': provider.apiKey.trim(),
-        },
-        signal: controller?.signal,
-      });
+      const collected: string[] = [];
+      let pageToken: string | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const query = new URLSearchParams({ pageSize: '1000' });
+        if (pageToken) {
+          query.set('pageToken', pageToken);
+        }
+        const response = await fetcher(`${urlCheck.normalized}/models?${query.toString()}`, {
+          method: 'GET',
+          headers: {
+            'x-goog-api-key': apiKey,
+          },
+          signal: controller?.signal,
+        });
 
-      const rawText = await response.text();
-      if (!response.ok) {
-        return { models: [], error: classifyProviderError(response.status, rawText, provider.kind) };
+        const rawText = await response.text();
+        if (!response.ok) {
+          return { models: [], error: classifyProviderError(response.status, rawText, provider.kind) };
+        }
+
+        const data = JSON.parse(rawText) as {
+          models?: Array<{ name?: string; supportedGenerationMethods?: string[] }>;
+          nextPageToken?: string;
+        };
+        const pageModels = (data.models ?? [])
+          .filter((m) =>
+            Array.isArray(m.supportedGenerationMethods)
+              ? m.supportedGenerationMethods.includes('generateContent')
+              : true
+          )
+          .map((m) => (m.name ?? '').replace(/^models\//, ''))
+          .filter((id) => Boolean(id));
+
+        collected.push(...pageModels);
+        if (!data.nextPageToken) break;
+        pageToken = data.nextPageToken;
       }
 
-      const data = JSON.parse(rawText) as {
-        models?: Array<{ name?: string; supportedGenerationMethods?: string[] }>;
-      };
-      const models = (data.models ?? [])
-        .filter((m) =>
-          Array.isArray(m.supportedGenerationMethods)
-            ? m.supportedGenerationMethods.includes('generateContent')
-            : true
-        )
-        .map((m) => (m.name ?? '').replace(/^models\//, ''))
-        .filter((id) => Boolean(id) && !id.includes('embedding') && !id.includes('aqa'));
-
-      return { models };
+      return { models: deduplicateStrings(collected) };
     }
 
-    // OpenAI / OpenAI-Compatible
+    if (provider.kind === 'anthropic') {
+      const collected: string[] = [];
+      let afterId: string | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const query = new URLSearchParams({ limit: '1000' });
+        if (afterId) {
+          query.set('after_id', afterId);
+        }
+        const response = await fetcher(`${urlCheck.normalized}/models?${query.toString()}`, {
+          method: 'GET',
+          headers: {
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+            'anthropic-dangerous-direct-browser-access': 'true',
+          },
+          signal: controller?.signal,
+        });
+
+        const rawText = await response.text();
+        if (!response.ok) {
+          return { models: [], error: classifyProviderError(response.status, rawText, provider.kind) };
+        }
+
+        const data = JSON.parse(rawText) as {
+          data?: Array<{ id?: string }>;
+          has_more?: boolean;
+          last_id?: string;
+        };
+        const pageModels = (data.data ?? []).map((m) => m.id ?? '').filter(Boolean);
+        collected.push(...pageModels);
+        if (!data.has_more || !data.last_id) break;
+        afterId = data.last_id;
+      }
+
+      return { models: deduplicateStrings(collected) };
+    }
+
+    // OpenAI / OpenAI-Compatible — fetch complete list without truncation
     const response = await fetcher(`${urlCheck.normalized}/models`, {
       method: 'GET',
       headers: {
-        Authorization: `Bearer ${provider.apiKey.trim()}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       signal: controller?.signal,
     });
@@ -327,14 +432,15 @@ export async function discoverProviderModels(
     }
 
     const data = JSON.parse(rawText) as { data?: Array<{ id?: string }> };
-    const models = (data.data ?? [])
-      .map((m) => m.id ?? '')
-      .filter(Boolean)
-      .slice(0, 60);
+    const models = deduplicateStrings((data.data ?? []).map((m) => m.id ?? '').filter(Boolean));
+    models.sort((a, b) => a.localeCompare(b));
 
     return { models };
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
+      if (externalSignal?.aborted && !timedOut) {
+        return { models: [], aborted: true };
+      }
       return { models: [], error: 'Model discovery timed out.' };
     }
     return {
@@ -346,6 +452,9 @@ export async function discoverProviderModels(
     };
   } finally {
     if (timer) clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
   }
 }
 
@@ -354,7 +463,7 @@ export async function generateProviderCompletion(
   request: ProviderCompletionRequest,
   fetcher: typeof fetch = fetch
 ): Promise<string> {
-  const urlCheck = validateProviderBaseUrl(provider.baseUrl);
+  const urlCheck = validateProviderBaseUrl(resolveProviderBaseUrl(provider));
   if (!urlCheck.valid) {
     throw new Error(urlCheck.error ?? 'Invalid provider base URL.');
   }
@@ -510,7 +619,7 @@ export async function testProviderConnection(
   fetcher: typeof fetch = fetch
 ): Promise<ConnectionTestResult> {
   const testedAt = new Date().toISOString();
-  const urlCheck = validateProviderBaseUrl(provider.baseUrl);
+  const urlCheck = validateProviderBaseUrl(resolveProviderBaseUrl(provider));
   if (!urlCheck.valid) {
     return {
       status: 'error',

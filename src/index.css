@@ -208,6 +208,26 @@
   -webkit-touch-callout: none;
 }
 
+/* Explicit top-layer fullscreen sizing so Viewport fills the screen cleanly in all browsers */
+[data-testid="viewport-presentation-root"]:fullscreen,
+[data-testid="viewport-presentation-root"]:-webkit-full-screen {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100dvh !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  background-color: #040406 !important;
+}
+
+[data-testid="viewport-presentation-root"]::backdrop,
+[data-testid="viewport-presentation-root"]::-webkit-backdrop {
+  background-color: #040406;
+}
+
 /* Smooth, restrained studio UI transitions */
 @keyframes studioFadeSlideUp {
   from {
@@ -216,7 +236,7 @@
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 }
 
