@@ -18,8 +18,9 @@ import type {
   RuntimeStatus,
 } from '../types/studio';
 import {
-  calculateContainedFrameSize,
+  calculateAdaptiveViewportLayout,
   getAspectRatioSpec,
+  type SceneDimensions,
 } from '../utils/studioLogic';
 
 interface SceneViewportProps {
@@ -72,6 +73,7 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
     width: 640,
     height: 440,
   });
+  const [detectedScene, setDetectedScene] = useState<SceneDimensions | null>(null);
   const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
   const [isFallbackFullscreen, setIsFallbackFullscreen] = useState(false);
   const [fullscreenNotice, setFullscreenNotice] = useState<string | null>(null);
@@ -82,6 +84,10 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
     const doc = document as Document & { webkitFullscreenElement?: Element | null };
     return document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
   };
+
+  useEffect(() => {
+    setDetectedScene(null);
+  }, [compiledBundle?.runId, reloadNonce]);
 
   useEffect(() => {
     const stageEl = stageRef.current;
@@ -103,8 +109,12 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
     };
 
     updateBounds();
+    let raf2Id = 0;
     const rafId = window.requestAnimationFrame(() => {
       updateBounds();
+      raf2Id = window.requestAnimationFrame(() => {
+        updateBounds();
+      });
     });
 
     if (typeof ResizeObserver !== 'undefined') {
@@ -115,6 +125,7 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
       window.addEventListener('resize', updateBounds);
       return () => {
         window.cancelAnimationFrame(rafId);
+        if (raf2Id) window.cancelAnimationFrame(raf2Id);
         observer.disconnect();
         window.removeEventListener('resize', updateBounds);
       };
@@ -123,6 +134,7 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
     window.addEventListener('resize', updateBounds);
     return () => {
       window.cancelAnimationFrame(rafId);
+      if (raf2Id) window.cancelAnimationFrame(raf2Id);
       window.removeEventListener('resize', updateBounds);
     };
   }, [isFullscreen]);
@@ -137,6 +149,9 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
         channel?: string;
         runId?: string;
         type?: string;
+        mode?: 'fixed' | 'fluid';
+        width?: number;
+        height?: number;
         message?: string;
         source?: string;
         line?: number;
@@ -145,6 +160,40 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
 
       if (!data || data.channel !== 'trenveds-runtime') return;
       if (!compiledBundle || data.runId !== compiledBundle.runId) return;
+
+      if (data.type === 'scene-dimensions') {
+        if (
+          data.mode === 'fixed' &&
+          typeof data.width === 'number' &&
+          typeof data.height === 'number' &&
+          Number.isFinite(data.width) &&
+          Number.isFinite(data.height) &&
+          data.width >= 16 &&
+          data.height >= 16
+        ) {
+          const nextW = Math.round(data.width);
+          const nextH = Math.round(data.height);
+          setDetectedScene((prev) => {
+            if (
+              prev &&
+              prev.mode === 'fixed' &&
+              Math.abs(prev.width - nextW) <= 1 &&
+              Math.abs(prev.height - nextH) <= 1
+            ) {
+              return prev;
+            }
+            return {
+              width: nextW,
+              height: nextH,
+              mode: 'fixed',
+              source: data.source,
+            };
+          });
+        } else if (data.mode === 'fluid') {
+          setDetectedScene((prev) => (prev === null || prev.mode === 'fluid' ? prev : null));
+        }
+        return;
+      }
 
       if (data.type === 'ready') {
         onRuntimeReady(data.runId);
@@ -253,15 +302,16 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
     }
   }, [isFallbackFullscreen]);
 
-  const frameSize = calculateContainedFrameSize(
+  const layout = calculateAdaptiveViewportLayout(
     stageBounds.width,
     stageBounds.height,
     aspectRatio,
     zoomPercent,
-    isFitMode || isFullscreen
+    isFitMode || isFullscreen,
+    detectedScene
   );
 
-  const isCompactFrame = frameSize.width < 290 || frameSize.height < 230;
+  const isCompactFrame = layout.displayWidth < 290 || layout.displayHeight < 230;
   const hasCompiledScene = Boolean(compiledBundle && compiledBundle.html);
 
   return (
@@ -310,11 +360,13 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
         </div>
 
         <div className="flex items-center gap-2 text-[11px] font-mono tabular-nums text-zinc-400 whitespace-nowrap shrink-0">
-          <span className="hidden sm:inline">{spec.resolution}</span>
+          <span className="hidden sm:inline" data-testid="viewport-resolution-label">
+            {layout.resolutionLabel}
+          </span>
           <span aria-hidden="true" className="hidden sm:inline text-zinc-600">
             ·
           </span>
-          <span>{aspectRatio}</span>
+          <span data-testid="viewport-aspect-label">{layout.aspectLabel}</span>
           <span aria-hidden="true" className="text-zinc-600">
             ·
           </span>
@@ -344,17 +396,21 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
             isFullscreen ? 'p-4 sm:p-8' : 'p-4 sm:p-6'
           }`}
         >
-          {/* Contained Video Frame (proportional pixel dimensions, m-auto prevents flex overflow clipping) */}
+          {/* Contained Video Frame (adaptive dimensions, center-anchored uniform scaling) */}
           <div
             data-testid="viewport-frame"
-            data-aspect-ratio={aspectRatio}
+            data-aspect-ratio={layout.aspectLabel}
+            data-scene-width={layout.sceneWidth}
+            data-scene-height={layout.sceneHeight}
+            data-scene-scale={layout.scale.toFixed(6)}
+            data-scene-mode={layout.isFixedScene ? 'fixed' : 'fluid'}
             draggable={false}
             onCopy={(event) => event.preventDefault()}
             onDragStart={(event) => event.preventDefault()}
             onContextMenu={(event) => event.preventDefault()}
             style={{
-              width: `${frameSize.width}px`,
-              height: `${frameSize.height}px`,
+              width: `${layout.displayWidth}px`,
+              height: `${layout.displayHeight}px`,
             }}
             className="viewport-video-surface crimson-edge-left crimson-edge-right relative m-auto shrink-0 flex items-center justify-center overflow-hidden rounded-lg border border-white/15 bg-[#08090D] shadow-[0_32px_90px_-24px_rgba(0,0,0,0.96),inset_0_1px_0_rgba(255,255,255,0.08)]"
           >
@@ -363,10 +419,30 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
                 ref={iframeRef}
                 key={`${compiledBundle.runId}-${reloadNonce}`}
                 data-testid="scene-runtime-iframe"
+                data-render-width={layout.sceneWidth}
+                data-render-height={layout.sceneHeight}
+                data-scale={layout.scale.toFixed(6)}
                 title="TRENVEDs Isolated Scene Runtime"
                 sandbox="allow-scripts"
                 srcDoc={compiledBundle.html}
-                className="h-full w-full border-0 bg-[#060608]"
+                style={
+                  layout.isFixedScene
+                    ? {
+                        position: 'absolute',
+                        left: '50%',
+                        top: '50%',
+                        width: `${layout.sceneWidth}px`,
+                        height: `${layout.sceneHeight}px`,
+                        transform: `translate(-50%, -50%) scale(${layout.scale})`,
+                        transformOrigin: 'center center',
+                      }
+                    : undefined
+                }
+                className={
+                  layout.isFixedScene
+                    ? 'border-0 bg-[#060608]'
+                    : 'h-full w-full border-0 bg-[#060608]'
+                }
               />
             ) : (
               <div
@@ -443,7 +519,7 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
               className="studio-glass-elevated studio-dialog-panel flex max-w-full flex-wrap items-center justify-center gap-2 sm:gap-3 rounded-xl px-3 sm:px-4 py-2 text-xs"
             >
               <span className="font-mono tabular-nums text-zinc-300 whitespace-nowrap">
-                {aspectRatio} · {spec.resolution}
+                {layout.aspectLabel} · {layout.resolutionLabel}
               </span>
               <span aria-hidden="true" className="hidden sm:inline h-3.5 w-px bg-white/15" />
               <div className="flex items-center gap-2">

@@ -102,7 +102,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
             <div className="lg:col-span-6 space-y-6">
               <p className="text-sm font-medium text-red-400 tracking-wide">
-                TRENVEDs V1.3 · AI Scene Studio
+                TRENVEDs v1.4 · AI Scene Studio
               </p>
 
               <h1 className="font-display text-4xl sm:text-5xl font-semibold tracking-tight text-white leading-[1.08] [text-wrap:balance]">
@@ -351,7 +351,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         <div className="mx-auto flex max-w-6xl flex-col sm:flex-row items-start sm:items-center justify-between gap-4 px-4 sm:px-6 text-xs text-zinc-500">
           <div className="flex items-center gap-3">
             <BrandMark compact />
-            <span>V1.3 AI Diagnostics &amp; Script Workspace</span>
+            <span>v1.4 Adaptive Runtime &amp; Script Workspace</span>
           </div>
           <div className="flex items-center gap-5">
             <button

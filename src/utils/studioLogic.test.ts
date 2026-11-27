@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  calculateAdaptiveViewportLayout,
   calculateContainedFrameSize,
   clampPanelWidth,
   clampZoom,
   createLocalProject,
   detectLanguageFromFilename,
+  formatSceneAspectLabel,
   getAspectRatioSpec,
   sanitizeProjectName,
 } from './studioLogic';
@@ -666,4 +668,117 @@ test('V1.4 detects circular dependencies, Node/server incompatibilities, non-web
   assert.equal(shouldSkipImportedPath('My Animation/.git/HEAD'), true);
   assert.equal(shouldSkipImportedPath('My Animation/src/App.tsx'), false);
 });
+
+test('calculateAdaptiveViewportLayout performs center-based uniform scaling across 16:9, 4K, 9:16, 1:1, giant, small, and fluid scenes', () => {
+  // 1920x1080 inside 800x600 stage
+  const hd = calculateAdaptiveViewportLayout(800, 600, '16:9', 100, true, {
+    width: 1920,
+    height: 1080,
+    mode: 'fixed',
+    source: 'body',
+  });
+  assert.equal(hd.isFixedScene, true);
+  assert.equal(hd.sceneWidth, 1920);
+  assert.equal(hd.sceneHeight, 1080);
+  assert.equal(hd.displayWidth, 800);
+  assert.equal(hd.displayHeight, 450);
+  assert.ok(Math.abs(hd.scale - 800 / 1920) < 1e-6);
+  assert.equal(hd.aspectLabel, '16:9');
+  assert.equal(hd.resolutionLabel, '1920 × 1080');
+
+  // 3840x2160 (4K) inside 800x600 stage -> shrunk uniformly without altering original resolution
+  const fourK = calculateAdaptiveViewportLayout(800, 600, '16:9', 100, true, {
+    width: 3840,
+    height: 2160,
+    mode: 'fixed',
+    source: 'canvas',
+  });
+  assert.equal(fourK.sceneWidth, 3840);
+  assert.equal(fourK.sceneHeight, 2160);
+  assert.equal(fourK.displayWidth, 800);
+  assert.equal(fourK.displayHeight, 450);
+  assert.ok(Math.abs(fourK.scale - 800 / 3840) < 1e-6);
+  assert.equal(fourK.resolutionLabel, '3840 × 2160');
+
+  // 1080x1920 vertical scene even when Studio selector was at 16:9 -> adapts to 9:16 and fits within height 600
+  const vertical = calculateAdaptiveViewportLayout(800, 600, '16:9', 100, true, {
+    width: 1080,
+    height: 1920,
+    mode: 'fixed',
+    source: 'root-child',
+  });
+  assert.equal(vertical.aspectLabel, '9:16');
+  assert.equal(vertical.resolutionLabel, '1080 × 1920');
+  assert.equal(vertical.displayHeight, 600);
+  assert.equal(vertical.displayWidth, 338);
+  assert.ok(vertical.displayWidth <= 800 && vertical.displayHeight <= 600);
+
+  // 1000x1000 square scene inside 800x600 stage -> adapts to 1:1 square (600x600)
+  const square = calculateAdaptiveViewportLayout(800, 600, '16:9', 100, true, {
+    width: 1000,
+    height: 1000,
+    mode: 'fixed',
+    source: 'body',
+  });
+  assert.equal(square.aspectLabel, '1:1');
+  assert.equal(square.displayWidth, 600);
+  assert.equal(square.displayHeight, 600);
+  assert.ok(Math.abs(square.scale - 0.6) < 1e-6);
+
+  // Giant 7680x4320 (8K) scene inside 720x500 stage -> strictly contained, zero overflow
+  const giant = calculateAdaptiveViewportLayout(720, 500, '16:9', 100, true, {
+    width: 7680,
+    height: 4320,
+    mode: 'fixed',
+    source: 'canvas',
+  });
+  assert.equal(giant.sceneWidth, 7680);
+  assert.equal(giant.sceneHeight, 4320);
+  assert.ok(giant.displayWidth <= 720 && giant.displayHeight <= 500);
+  assert.equal(giant.displayWidth, 720);
+  assert.equal(giant.displayHeight, 405);
+
+  // Small fixed scene 320x240 enlarged symmetrically to fit 800x600 (scale 2.5)
+  const small = calculateAdaptiveViewportLayout(800, 600, '16:9', 100, true, {
+    width: 320,
+    height: 240,
+    mode: 'fixed',
+  });
+  assert.equal(small.aspectLabel, '4:3');
+  assert.equal(small.displayWidth, 800);
+  assert.equal(small.displayHeight, 600);
+  assert.ok(Math.abs(small.scale - 2.5) < 1e-6);
+
+  // Manual zoom scales proportionally relative to fit scale
+  const zoomedOut = calculateAdaptiveViewportLayout(800, 600, '16:9', 50, false, {
+    width: 1920,
+    height: 1080,
+    mode: 'fixed',
+  });
+  assert.equal(zoomedOut.displayWidth, 400);
+  assert.equal(zoomedOut.displayHeight, 225);
+  assert.ok(Math.abs(zoomedOut.scale - (800 / 1920) * 0.5) < 1e-6);
+
+  // Fluid/responsive scene respects Studio aspectRatio selector without CSS scale transform
+  const fluid = calculateAdaptiveViewportLayout(800, 600, '9:16', 100, true, null);
+  assert.equal(fluid.isFixedScene, false);
+  assert.equal(fluid.scale, 1);
+  assert.equal(fluid.displayWidth, 338);
+  assert.equal(fluid.displayHeight, 600);
+  assert.equal(fluid.aspectLabel, '9:16');
+
+  assert.equal(formatSceneAspectLabel(1920, 1080), '16:9');
+  assert.equal(formatSceneAspectLabel(1080, 1920), '9:16');
+  assert.equal(formatSceneAspectLabel(1000, 1000), '1:1');
+  assert.equal(formatSceneAspectLabel(1440, 1080), '4:3');
+});
+
+test('compileSceneBundle injects scene-dimensions detection observer into runtime bridge', () => {
+  const bundle = compileSceneBundle([
+    { path: 'index.html', content: '<!doctype html><html><body style="width:3840px;height:2160px"></body></html>', updatedAt: '' },
+  ]);
+  assert.match(bundle.html, /scene-dimensions/);
+  assert.match(bundle.html, /detectSceneDimensions/);
+});
+
 

@@ -1105,7 +1105,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Footer */}
         <div className="flex shrink-0 items-center justify-between border-t border-white/10 bg-black/25 px-6 py-3.5">
           <span className="text-[11px] text-zinc-500">
-            TRENVEDs V1.2 · Credentials remain on your device
+            TRENVEDs v1.4 · Credentials remain on your device
           </span>
           <button
             type="button"

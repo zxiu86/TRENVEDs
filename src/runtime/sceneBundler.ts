@@ -727,10 +727,282 @@ function buildDiagnosticsBridgeScript(
     }
   };
 
+  var lockedCanvas = null;
+  var lockedCanvasSize = null;
+  var lastReportedDimKey = '';
+  var dimRafScheduled = false;
+
+  function isFixedCssLength(val) {
+    if (!val || typeof val !== 'string') return false;
+    var trimmed = val.trim().toLowerCase();
+    if (!trimmed || trimmed === 'auto' || trimmed === 'none' || trimmed === 'initial' || trimmed === 'inherit') return false;
+    if (trimmed.indexOf('%') !== -1 || trimmed.indexOf('vw') !== -1 || trimmed.indexOf('vh') !== -1 || trimmed.indexOf('vmin') !== -1 || trimmed.indexOf('vmax') !== -1) return false;
+    var num = parseFloat(trimmed);
+    return !isNaN(num) && num > 0 && /^[0-9]+(?:\.[0-9]+)?(?:px|pt|cm|mm|in|rem|em)$/i.test(trimmed);
+  }
+
+  function getExplicitCssSize(el) {
+    if (!el || el.nodeType !== 1) return null;
+    var wExpr = el.style && el.style.width ? el.style.width : '';
+    var hExpr = el.style && el.style.height ? el.style.height : '';
+
+    var matchedW = '';
+    var matchedH = '';
+    try {
+      var sheets = document.styleSheets || [];
+      for (var s = 0; s < sheets.length; s++) {
+        var sheet = sheets[s];
+        var owner = sheet.ownerNode;
+        if (owner && owner.getAttribute && owner.getAttribute('data-trenveds-base') === '1') {
+          continue;
+        }
+        var rules = null;
+        try {
+          rules = sheet.cssRules;
+        } catch (_) {
+          rules = null;
+        }
+        if (!rules) continue;
+        for (var r = 0; r < rules.length; r++) {
+          var rule = rules[r];
+          if (rule.type !== 1 || !rule.selectorText) continue;
+          try {
+            if (el.matches(rule.selectorText)) {
+              if (rule.style && rule.style.width) matchedW = rule.style.width;
+              if (rule.style && rule.style.height) matchedH = rule.style.height;
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    var finalW = wExpr || matchedW;
+    var finalH = hExpr || matchedH;
+
+    if (!isFixedCssLength(finalW) || !isFixedCssLength(finalH)) {
+      return null;
+    }
+
+    var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    var w = Math.round(el.offsetWidth || (rect ? rect.width : 0));
+    var h = Math.round(el.offsetHeight || (rect ? rect.height : 0));
+    if (w >= 16 && h >= 16) {
+      return { width: w, height: h };
+    }
+    return null;
+  }
+
+  function getSvgIntrinsicSize(svg) {
+    if (!svg) return null;
+    var explicitCss = getExplicitCssSize(svg);
+    if (explicitCss) return explicitCss;
+
+    var wAttr = svg.getAttribute ? svg.getAttribute('width') : null;
+    var hAttr = svg.getAttribute ? svg.getAttribute('height') : null;
+    if (wAttr && hAttr && wAttr.indexOf('%') === -1 && hAttr.indexOf('%') === -1) {
+      var wNum = parseFloat(wAttr);
+      var hNum = parseFloat(hAttr);
+      if (!isNaN(wNum) && !isNaN(hNum) && wNum >= 16 && hNum >= 16) {
+        return { width: Math.round(wNum), height: Math.round(hNum) };
+      }
+    }
+
+    if (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width >= 16 && svg.viewBox.baseVal.height >= 16) {
+      return {
+        width: Math.round(svg.viewBox.baseVal.width),
+        height: Math.round(svg.viewBox.baseVal.height)
+      };
+    }
+    return null;
+  }
+
+  function getMeaningfulChildren(parent) {
+    if (!parent || !parent.children) return [];
+    var out = [];
+    for (var i = 0; i < parent.children.length; i++) {
+      var c = parent.children[i];
+      var tag = c.tagName ? c.tagName.toLowerCase() : '';
+      if (tag === 'script' || tag === 'style' || tag === 'link' || tag === 'meta') continue;
+      out.push(c);
+    }
+    return out;
+  }
+
+  function detectSceneDimensions() {
+    var docEl = document.documentElement;
+    var body = document.body;
+    if (!docEl || !body) {
+      return { mode: 'fluid', width: 0, height: 0, source: 'none' };
+    }
+
+    var bodyChildren = getMeaningfulChildren(body);
+    if (bodyChildren.length === 1 && bodyChildren[0].tagName && bodyChildren[0].tagName.toLowerCase() === 'svg') {
+      var svgSize = getSvgIntrinsicSize(bodyChildren[0]);
+      if (svgSize) {
+        return { mode: 'fixed', width: svgSize.width, height: svgSize.height, source: 'svg' };
+      }
+    }
+
+    var htmlCss = getExplicitCssSize(docEl);
+    if (htmlCss) {
+      return { mode: 'fixed', width: htmlCss.width, height: htmlCss.height, source: 'html' };
+    }
+
+    var bodyCss = getExplicitCssSize(body);
+    if (bodyCss) {
+      return { mode: 'fixed', width: bodyCss.width, height: bodyCss.height, source: 'body' };
+    }
+
+    var rootEl = document.getElementById('root') || document.getElementById('app');
+    var candidates = [];
+    var namedNodes = document.querySelectorAll('#scene, #stage, #viewport, .scene, .stage, #root, #app, main');
+    for (var i = 0; i < namedNodes.length; i++) {
+      candidates.push({ el: namedNodes[i], minSize: 64, source: 'root-container' });
+    }
+    for (var b = 0; b < bodyChildren.length; b++) {
+      candidates.push({ el: bodyChildren[b], minSize: bodyChildren.length === 1 ? 64 : 120, source: 'body-child' });
+    }
+    if (rootEl) {
+      var rootChildren = getMeaningfulChildren(rootEl);
+      for (var rc = 0; rc < rootChildren.length; rc++) {
+        candidates.push({ el: rootChildren[rc], minSize: rootChildren.length === 1 ? 64 : 120, source: 'root-child' });
+      }
+    }
+
+    var bestContainer = null;
+    var bestArea = 0;
+    for (var k = 0; k < candidates.length; k++) {
+      var item = candidates[k];
+      if (!item.el || (item.el.tagName && item.el.tagName.toLowerCase() === 'canvas')) continue;
+      var sz = getExplicitCssSize(item.el);
+      if (sz && sz.width >= item.minSize && sz.height >= item.minSize) {
+        var area = sz.width * sz.height;
+        if (area > bestArea) {
+          bestArea = area;
+          bestContainer = { width: sz.width, height: sz.height, source: item.source };
+        }
+      }
+    }
+    if (bestContainer) {
+      return { mode: 'fixed', width: bestContainer.width, height: bestContainer.height, source: bestContainer.source };
+    }
+
+    var canvases = document.querySelectorAll('canvas');
+    var primaryCanvas = null;
+    var primaryCanvasArea = 0;
+    for (var c = 0; c < canvases.length; c++) {
+      var cv = canvases[c];
+      var cw = cv.width || 0;
+      var ch = cv.height || 0;
+      if (cw * ch > primaryCanvasArea) {
+        primaryCanvasArea = cw * ch;
+        primaryCanvas = cv;
+      }
+    }
+
+    if (primaryCanvas) {
+      var canvasCss = getExplicitCssSize(primaryCanvas);
+      if (canvasCss) {
+        return { mode: 'fixed', width: canvasCss.width, height: canvasCss.height, source: 'canvas-css' };
+      }
+
+      var hasExplicitAttrs = primaryCanvas.hasAttribute('width') && primaryCanvas.hasAttribute('height');
+      var hasCustomBuffer = primaryCanvas.width > 0 && primaryCanvas.height > 0 && (primaryCanvas.width !== 300 || primaryCanvas.height !== 150);
+
+      if (hasExplicitAttrs || hasCustomBuffer) {
+        var dpr = window.devicePixelRatio || 1;
+        var vw = window.innerWidth || 0;
+        var vh = window.innerHeight || 0;
+        var isLockedSame =
+          lockedCanvas === primaryCanvas &&
+          lockedCanvasSize &&
+          lockedCanvasSize.w === primaryCanvas.width &&
+          lockedCanvasSize.h === primaryCanvas.height;
+
+        var matchesViewport =
+          (Math.abs(primaryCanvas.width - vw) <= 3 || Math.abs(primaryCanvas.width / dpr - vw) <= 3) &&
+          (Math.abs(primaryCanvas.height - vh) <= 3 || Math.abs(primaryCanvas.height / dpr - vh) <= 3);
+
+        if (isLockedSame || !matchesViewport) {
+          lockedCanvas = primaryCanvas;
+          lockedCanvasSize = { w: primaryCanvas.width, h: primaryCanvas.height };
+          return {
+            mode: 'fixed',
+            width: primaryCanvas.width,
+            height: primaryCanvas.height,
+            source: 'canvas'
+          };
+        }
+      }
+    }
+
+    // Fallback: if external/unreadable CSS forces explicit large document overflow beyond viewport
+    if (docEl.scrollWidth > (window.innerWidth || 0) + 12 && docEl.scrollHeight > (window.innerHeight || 0) + 12) {
+      return {
+        mode: 'fixed',
+        width: Math.round(docEl.scrollWidth),
+        height: Math.round(docEl.scrollHeight),
+        source: 'scroll-bounds'
+      };
+    }
+
+    return { mode: 'fluid', width: 0, height: 0, source: 'fluid' };
+  }
+
+  function reportSceneDimensions() {
+    try {
+      var dim = detectSceneDimensions();
+      var key = dim.mode + ':' + dim.width + 'x' + dim.height;
+      if (key === lastReportedDimKey) return;
+      lastReportedDimKey = key;
+      post({
+        type: 'scene-dimensions',
+        mode: dim.mode,
+        width: dim.width,
+        height: dim.height,
+        source: dim.source
+      });
+    } catch (_) {}
+  }
+
+  function scheduleReportDimensions() {
+    if (dimRafScheduled) return;
+    dimRafScheduled = true;
+    requestAnimationFrame(function () {
+      dimRafScheduled = false;
+      reportSceneDimensions();
+    });
+  }
+
+  function installDimensionObservers() {
+    reportSceneDimensions();
+    if (typeof MutationObserver !== 'undefined' && document.documentElement) {
+      var mo = new MutationObserver(function () {
+        scheduleReportDimensions();
+      });
+      mo.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style', 'class', 'width', 'height', 'viewBox']
+      });
+    }
+    if (typeof ResizeObserver !== 'undefined' && document.documentElement) {
+      var ro = new ResizeObserver(function () {
+        scheduleReportDimensions();
+      });
+      ro.observe(document.documentElement);
+      if (document.body) ro.observe(document.body);
+    }
+  }
+
   function signalReady() {
+    reportSceneDimensions();
     if (readySent || hasError) return;
     requestAnimationFrame(function () {
+      reportSceneDimensions();
       requestAnimationFrame(function () {
+        reportSceneDimensions();
         if (readySent || hasError) return;
         readySent = true;
         post({ type: 'ready' });
@@ -739,11 +1011,16 @@ function buildDiagnosticsBridgeScript(
   }
 
   if (document.readyState === 'complete') {
+    installDimensionObservers();
     signalReady();
   } else {
-    window.addEventListener('load', signalReady, { once: true });
     document.addEventListener('DOMContentLoaded', function () {
+      installDimensionObservers();
       setTimeout(signalReady, 40);
+    }, { once: true });
+    window.addEventListener('load', function () {
+      reportSceneDimensions();
+      signalReady();
     }, { once: true });
   }
 })();

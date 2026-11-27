@@ -98,6 +98,131 @@ export function calculateContainedFrameSize(
   };
 }
 
+export interface SceneDimensions {
+  width: number;
+  height: number;
+  mode: 'fixed' | 'fluid';
+  source?: string;
+}
+
+export interface AdaptiveViewportLayout {
+  sceneWidth: number;
+  sceneHeight: number;
+  scale: number;
+  displayWidth: number;
+  displayHeight: number;
+  isFixedScene: boolean;
+  resolutionLabel: string;
+  aspectLabel: string;
+}
+
+function gcd(a: number, b: number): number {
+  let x = Math.abs(Math.round(a));
+  let y = Math.abs(Math.round(b));
+  while (y !== 0) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x || 1;
+}
+
+export function formatSceneAspectLabel(width: number, height: number): string {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return '16:9';
+  }
+  const ratio = width / height;
+  if (Math.abs(ratio - 16 / 9) < 0.015) return '16:9';
+  if (Math.abs(ratio - 9 / 16) < 0.015) return '9:16';
+  if (Math.abs(ratio - 1) < 0.015) return '1:1';
+  if (Math.abs(ratio - 4 / 3) < 0.015) return '4:3';
+  if (Math.abs(ratio - 3 / 4) < 0.015) return '3:4';
+  if (Math.abs(ratio - 21 / 9) < 0.02) return '21:9';
+
+  const divisor = gcd(width, height);
+  const wPart = Math.round(width / divisor);
+  const hPart = Math.round(height / divisor);
+  if (wPart <= 32 && hPart <= 32) {
+    return `${wPart}:${hPart}`;
+  }
+
+  return `${Number(ratio.toFixed(2))}:1`;
+}
+
+/**
+ * Calculates center-anchored, uniform (X === Y) viewport scaling and container frame size.
+ * Fixed-dimension scenes keep their exact intrinsic sceneWidth x sceneHeight inside the runtime
+ * while scaling uniformly around center to fit cleanly inside available stage bounds.
+ * Fluid scenes adapt directly to the user-selected aspectRatio container.
+ */
+export function calculateAdaptiveViewportLayout(
+  availableWidth: number,
+  availableHeight: number,
+  aspectRatio: AspectRatio,
+  zoomPercent: number,
+  isFitMode: boolean,
+  detectedScene: SceneDimensions | null = null
+): AdaptiveViewportLayout {
+  const safeAvailW =
+    Number.isFinite(availableWidth) && availableWidth > 40 ? availableWidth : 320;
+  const safeAvailH =
+    Number.isFinite(availableHeight) && availableHeight > 40 ? availableHeight : 240;
+
+  const hasValidFixedScene = Boolean(
+    detectedScene &&
+      detectedScene.mode === 'fixed' &&
+      Number.isFinite(detectedScene.width) &&
+      Number.isFinite(detectedScene.height) &&
+      detectedScene.width >= 16 &&
+      detectedScene.height >= 16
+  );
+
+  if (hasValidFixedScene && detectedScene) {
+    const sceneWidth = Math.min(32768, Math.max(16, Math.round(detectedScene.width)));
+    const sceneHeight = Math.min(32768, Math.max(16, Math.round(detectedScene.height)));
+
+    const fitScale = Math.min(safeAvailW / sceneWidth, safeAvailH / sceneHeight);
+    const scale = isFitMode ? fitScale : fitScale * (clampZoom(zoomPercent) / 100);
+
+    const rawDisplayW = Math.max(1, Math.round(sceneWidth * scale));
+    const rawDisplayH = Math.max(1, Math.round(sceneHeight * scale));
+
+    const displayWidth = isFitMode ? Math.min(Math.floor(safeAvailW), rawDisplayW) : rawDisplayW;
+    const displayHeight = isFitMode ? Math.min(Math.floor(safeAvailH), rawDisplayH) : rawDisplayH;
+
+    return {
+      sceneWidth,
+      sceneHeight,
+      scale,
+      displayWidth: Math.max(1, displayWidth),
+      displayHeight: Math.max(1, displayHeight),
+      isFixedScene: true,
+      resolutionLabel: `${sceneWidth} × ${sceneHeight}`,
+      aspectLabel: formatSceneAspectLabel(sceneWidth, sceneHeight),
+    };
+  }
+
+  const spec = getAspectRatioSpec(aspectRatio);
+  const contained = calculateContainedFrameSize(
+    safeAvailW,
+    safeAvailH,
+    aspectRatio,
+    zoomPercent,
+    isFitMode
+  );
+
+  return {
+    sceneWidth: contained.width,
+    sceneHeight: contained.height,
+    scale: 1,
+    displayWidth: contained.width,
+    displayHeight: contained.height,
+    isFixedScene: false,
+    resolutionLabel: spec.resolution,
+    aspectLabel: aspectRatio,
+  };
+}
+
 const EXTENSION_LANGUAGE_MAP: Record<string, DetectedLanguage> = {
   html: { id: 'html', label: 'HTML' },
   htm: { id: 'html', label: 'HTML' },
