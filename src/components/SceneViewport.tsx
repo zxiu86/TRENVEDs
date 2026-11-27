@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Clapperboard,
@@ -20,6 +20,7 @@ import type {
 import {
   calculateAdaptiveViewportLayout,
   getAspectRatioSpec,
+  inferInitialSceneDimensions,
   type SceneDimensions,
 } from '../utils/studioLogic';
 
@@ -302,13 +303,20 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
     }
   }, [isFallbackFullscreen]);
 
+  const initialScene = useMemo(
+    () => (compiledBundle?.html ? inferInitialSceneDimensions(compiledBundle.html) : null),
+    [compiledBundle?.html]
+  );
+
+  const effectiveScene = detectedScene ?? initialScene;
+
   const layout = calculateAdaptiveViewportLayout(
     stageBounds.width,
     stageBounds.height,
     aspectRatio,
     zoomPercent,
     isFitMode || isFullscreen,
-    detectedScene
+    effectiveScene
   );
 
   const isCompactFrame = layout.displayWidth < 290 || layout.displayHeight < 230;
@@ -396,118 +404,113 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
             isFullscreen ? 'p-4 sm:p-8' : 'p-4 sm:p-6'
           }`}
         >
-          {/* Contained Video Frame (adaptive dimensions, center-anchored uniform scaling) */}
-          <div
-            data-testid="viewport-frame"
-            data-aspect-ratio={layout.aspectLabel}
-            data-scene-width={layout.sceneWidth}
-            data-scene-height={layout.sceneHeight}
-            data-scene-scale={layout.scale.toFixed(6)}
-            data-scene-mode={layout.isFixedScene ? 'fixed' : 'fluid'}
-            draggable={false}
-            onCopy={(event) => event.preventDefault()}
-            onDragStart={(event) => event.preventDefault()}
-            onContextMenu={(event) => event.preventDefault()}
-            style={{
-              width: `${layout.displayWidth}px`,
-              height: `${layout.displayHeight}px`,
-            }}
-            className="viewport-video-surface crimson-edge-left crimson-edge-right relative m-auto shrink-0 flex items-center justify-center overflow-hidden rounded-lg border border-white/15 bg-[#08090D] shadow-[0_32px_90px_-24px_rgba(0,0,0,0.96),inset_0_1px_0_rgba(255,255,255,0.08)]"
-          >
-            {hasCompiledScene && compiledBundle ? (
-              <iframe
-                ref={iframeRef}
-                key={`${compiledBundle.runId}-${reloadNonce}`}
-                data-testid="scene-runtime-iframe"
-                data-render-width={layout.sceneWidth}
-                data-render-height={layout.sceneHeight}
-                data-scale={layout.scale.toFixed(6)}
-                title="TRENVEDs Isolated Scene Runtime"
-                sandbox="allow-scripts"
-                srcDoc={compiledBundle.html}
-                style={
-                  layout.isFixedScene
-                    ? {
-                        position: 'absolute',
-                        left: '50%',
-                        top: '50%',
-                        width: `${layout.sceneWidth}px`,
-                        height: `${layout.sceneHeight}px`,
-                        transform: `translate(-50%, -50%) scale(${layout.scale})`,
-                        transformOrigin: 'center center',
-                      }
-                    : undefined
-                }
-                className={
-                  layout.isFixedScene
-                    ? 'border-0 bg-[#060608]'
-                    : 'h-full w-full border-0 bg-[#060608]'
-                }
-              />
-            ) : (
-              <div
-                className={`relative z-10 rounded-xl border border-white/[0.06] bg-[#08090D]/90 text-center backdrop-blur-sm ${
-                  isCompactFrame ? 'max-w-[90%] px-3 py-3' : 'max-w-xs sm:max-w-sm px-5 py-4'
-                }`}
-              >
-                <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-zinc-300">
-                  <Clapperboard className="h-4.5 w-4.5 text-red-400" />
-                </div>
-                <p className="mt-2.5 font-display text-xs sm:text-sm font-semibold text-zinc-100">
-                  Scene monitor ready
-                </p>
-                {!isCompactFrame && (
-                  <p className="mt-1.5 text-xs leading-relaxed text-zinc-400">
-                    Describe a scene in AI Direction to compile and run live animated output inside this {aspectRatio} frame.
+          <div className="flex min-h-full min-w-full shrink-0 items-center justify-center">
+            {/* Contained Video Frame (Independent Render Surface projected around center) */}
+            <div
+              data-testid="viewport-frame"
+              data-aspect-ratio={layout.aspectLabel}
+              data-scene-width={layout.sceneWidth}
+              data-scene-height={layout.sceneHeight}
+              data-scene-scale={layout.scale.toFixed(6)}
+              data-scene-mode={layout.isFixedScene ? 'fixed' : 'fluid'}
+              draggable={false}
+              onCopy={(event) => event.preventDefault()}
+              onDragStart={(event) => event.preventDefault()}
+              onContextMenu={(event) => event.preventDefault()}
+              style={{
+                width: `${layout.displayWidth}px`,
+                height: `${layout.displayHeight}px`,
+              }}
+              className="viewport-video-surface crimson-edge-left crimson-edge-right relative shrink-0 flex items-center justify-center overflow-hidden rounded-lg border border-white/15 bg-[#08090D] shadow-[0_32px_90px_-24px_rgba(0,0,0,0.96),inset_0_1px_0_rgba(255,255,255,0.08)]"
+            >
+              {hasCompiledScene && compiledBundle ? (
+                <iframe
+                  ref={iframeRef}
+                  key={`${compiledBundle.runId}-${reloadNonce}`}
+                  name={layout.isFixedScene ? 'tv-fixed' : 'tv-comp'}
+                  data-testid="scene-runtime-iframe"
+                  data-render-width={layout.sceneWidth}
+                  data-render-height={layout.sceneHeight}
+                  data-scale={layout.scale.toFixed(6)}
+                  title="TRENVEDs Isolated Scene Runtime"
+                  sandbox="allow-scripts"
+                  srcDoc={compiledBundle.html}
+                  style={{
+                    position: 'absolute',
+                    left: '50%',
+                    top: '50%',
+                    width: `${layout.sceneWidth}px`,
+                    height: `${layout.sceneHeight}px`,
+                    transform: `translate(-50%, -50%) scale(${layout.scale})`,
+                    transformOrigin: 'center center',
+                  }}
+                  className="border-0 bg-[#060608]"
+                />
+              ) : (
+                <div
+                  className={`relative z-10 rounded-xl border border-white/[0.06] bg-[#08090D]/90 text-center backdrop-blur-sm ${
+                    isCompactFrame ? 'max-w-[90%] px-3 py-3' : 'max-w-xs sm:max-w-sm px-5 py-4'
+                  }`}
+                >
+                  <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-zinc-300">
+                    <Clapperboard className="h-4.5 w-4.5 text-red-400" />
+                  </div>
+                  <p className="mt-2.5 font-display text-xs sm:text-sm font-semibold text-zinc-100">
+                    Scene monitor ready
                   </p>
-                )}
-                <p className="mt-2.5 font-mono tabular-nums text-[11px] text-zinc-500">
-                  {spec.label} · {spec.resolution} · {frameRate} fps
-                </p>
-              </div>
-            )}
-
-            {/* Optional Safe-Area & Rule-of-Thirds Guides (overlay strictly pointer-events-none) */}
-            {showGuides && (
-              <div
-                data-testid="viewport-guides"
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-0 z-10"
-              >
-                <div className="absolute inset-[8%] border border-dashed border-white/10" />
-                <div className="absolute inset-y-0 left-1/3 w-px bg-white/[0.05]" />
-                <div className="absolute inset-y-0 left-2/3 w-px bg-white/[0.05]" />
-                <div className="absolute inset-x-0 top-1/3 h-px bg-white/[0.05]" />
-                <div className="absolute inset-x-0 top-2/3 h-px bg-white/[0.05]" />
-                <div className="absolute left-1/2 top-1/2 h-4 w-px -translate-x-1/2 -translate-y-1/2 bg-red-500/40" />
-                <div className="absolute left-1/2 top-1/2 h-px w-4 -translate-x-1/2 -translate-y-1/2 bg-red-500/40" />
-              </div>
-            )}
-
-            {/* Honest Runtime / Compile Diagnostic Overlay when errors exist */}
-            {runtimeDiagnostics.length > 0 && (
-              <div
-                data-testid="runtime-error-overlay"
-                role="alert"
-                className="studio-glass-elevated absolute inset-x-3 bottom-3 z-20 max-h-[42%] overflow-y-auto studio-scroll rounded-lg border border-red-500/45 px-3 py-2 text-xs text-red-200"
-              >
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <p className="font-medium text-red-100">
-                      Scene Runtime Diagnostic
-                      {runtimeDiagnostics.length > 1 ? ` (${runtimeDiagnostics.length})` : ''}
+                  {!isCompactFrame && (
+                    <p className="mt-1.5 text-xs leading-relaxed text-zinc-400">
+                      Describe a scene in AI Direction to compile and run live animated output inside this {aspectRatio} frame.
                     </p>
-                    {runtimeDiagnostics.slice(0, 3).map((diag) => (
-                      <p key={diag.id} className="text-[11px] text-red-200/90 break-words">
-                        {diag.source ? <span className="font-mono text-red-300">{diag.source}{diag.line ? `:${diag.line}` : ''}: </span> : null}
-                        {diag.message}
+                  )}
+                  <p className="mt-2.5 font-mono tabular-nums text-[11px] text-zinc-500">
+                    {spec.label} · {spec.resolution} · {frameRate} fps
+                  </p>
+                </div>
+              )}
+
+              {/* Optional Safe-Area & Rule-of-Thirds Guides (overlay strictly pointer-events-none) */}
+              {showGuides && (
+                <div
+                  data-testid="viewport-guides"
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 z-10"
+                >
+                  <div className="absolute inset-[8%] border border-dashed border-white/10" />
+                  <div className="absolute inset-y-0 left-1/3 w-px bg-white/[0.05]" />
+                  <div className="absolute inset-y-0 left-2/3 w-px bg-white/[0.05]" />
+                  <div className="absolute inset-x-0 top-1/3 h-px bg-white/[0.05]" />
+                  <div className="absolute inset-x-0 top-2/3 h-px bg-white/[0.05]" />
+                  <div className="absolute left-1/2 top-1/2 h-4 w-px -translate-x-1/2 -translate-y-1/2 bg-red-500/40" />
+                  <div className="absolute left-1/2 top-1/2 h-px w-4 -translate-x-1/2 -translate-y-1/2 bg-red-500/40" />
+                </div>
+              )}
+
+              {/* Honest Runtime / Compile Diagnostic Overlay when errors exist */}
+              {runtimeDiagnostics.length > 0 && (
+                <div
+                  data-testid="runtime-error-overlay"
+                  role="alert"
+                  className="studio-glass-elevated absolute inset-x-3 bottom-3 z-20 max-h-[42%] overflow-y-auto studio-scroll rounded-lg border border-red-500/45 px-3 py-2 text-xs text-red-200"
+                >
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <p className="font-medium text-red-100">
+                        Scene Runtime Diagnostic
+                        {runtimeDiagnostics.length > 1 ? ` (${runtimeDiagnostics.length})` : ''}
                       </p>
-                    ))}
+                      {runtimeDiagnostics.slice(0, 3).map((diag) => (
+                        <p key={diag.id} className="text-[11px] text-red-200/90 break-words">
+                          {diag.source ? <span className="font-mono text-red-300">{diag.source}{diag.line ? `:${diag.line}` : ''}: </span> : null}
+                          {diag.message}
+                        </p>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
 

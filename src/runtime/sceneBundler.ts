@@ -732,22 +732,78 @@ function buildDiagnosticsBridgeScript(
   var lastReportedDimKey = '';
   var dimRafScheduled = false;
 
-  function isFixedCssLength(val) {
+  function isNonResponsiveLength(val) {
     if (!val || typeof val !== 'string') return false;
     var trimmed = val.trim().toLowerCase();
-    if (!trimmed || trimmed === 'auto' || trimmed === 'none' || trimmed === 'initial' || trimmed === 'inherit') return false;
-    if (trimmed.indexOf('%') !== -1 || trimmed.indexOf('vw') !== -1 || trimmed.indexOf('vh') !== -1 || trimmed.indexOf('vmin') !== -1 || trimmed.indexOf('vmax') !== -1) return false;
-    var num = parseFloat(trimmed);
-    return !isNaN(num) && num > 0 && /^[0-9]+(?:\.[0-9]+)?(?:px|pt|cm|mm|in|rem|em)$/i.test(trimmed);
+    if (
+      !trimmed ||
+      trimmed === 'auto' ||
+      trimmed === 'none' ||
+      trimmed === 'initial' ||
+      trimmed === 'inherit' ||
+      trimmed === 'unset' ||
+      trimmed === 'fit-content' ||
+      trimmed === 'min-content' ||
+      trimmed === 'max-content'
+    ) {
+      return false;
+    }
+    if (
+      trimmed.indexOf('%') !== -1 ||
+      trimmed.indexOf('vw') !== -1 ||
+      trimmed.indexOf('vh') !== -1 ||
+      trimmed.indexOf('vmin') !== -1 ||
+      trimmed.indexOf('vmax') !== -1
+    ) {
+      return false;
+    }
+    if (/^[0-9]+(?:\.[0-9]+)?(?:px|pt|cm|mm|in|rem|em)$/i.test(trimmed)) {
+      return parseFloat(trimmed) > 0;
+    }
+    return trimmed.indexOf('var(') !== -1 || trimmed.indexOf('calc(') !== -1;
+  }
+
+  function hasResponsiveViewportRule(el) {
+    if (!el || el.nodeType !== 1) return false;
+    var wExpr = el.style && (el.style.width || el.style.minWidth) ? (el.style.width || el.style.minWidth) : '';
+    var hExpr = el.style && (el.style.height || el.style.minHeight) ? (el.style.height || el.style.minHeight) : '';
+    try {
+      var sheets = document.styleSheets || [];
+      for (var s = 0; s < sheets.length; s++) {
+        var sheet = sheets[s];
+        var owner = sheet.ownerNode;
+        if (owner && owner.getAttribute && owner.getAttribute('data-trenveds-base') === '1') {
+          continue;
+        }
+        var rules = null;
+        try { rules = sheet.cssRules; } catch (_) { rules = null; }
+        if (!rules) continue;
+        for (var r = 0; r < rules.length; r++) {
+          var rule = rules[r];
+          if (rule.type !== 1 || !rule.selectorText) continue;
+          try {
+            if (el.matches(rule.selectorText) && rule.style) {
+              if (rule.style.width || rule.style.minWidth) wExpr = rule.style.width || rule.style.minWidth;
+              if (rule.style.height || rule.style.minHeight) hExpr = rule.style.height || rule.style.minHeight;
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+    var hasRespW = /100%|100vw|100dvw/i.test(wExpr);
+    var hasRespH = /100%|100vh|100dvh/i.test(hExpr);
+    return hasRespW && hasRespH;
   }
 
   function getExplicitCssSize(el) {
     if (!el || el.nodeType !== 1) return null;
-    var wExpr = el.style && el.style.width ? el.style.width : '';
-    var hExpr = el.style && el.style.height ? el.style.height : '';
+    var wExpr = el.style && (el.style.width || el.style.minWidth) ? (el.style.width || el.style.minWidth) : '';
+    var hExpr = el.style && (el.style.height || el.style.minHeight) ? (el.style.height || el.style.minHeight) : '';
+    var arExpr = el.style && el.style.aspectRatio ? el.style.aspectRatio : '';
 
     var matchedW = '';
     var matchedH = '';
+    var matchedAr = '';
     try {
       var sheets = document.styleSheets || [];
       for (var s = 0; s < sheets.length; s++) {
@@ -767,9 +823,16 @@ function buildDiagnosticsBridgeScript(
           var rule = rules[r];
           if (rule.type !== 1 || !rule.selectorText) continue;
           try {
-            if (el.matches(rule.selectorText)) {
-              if (rule.style && rule.style.width) matchedW = rule.style.width;
-              if (rule.style && rule.style.height) matchedH = rule.style.height;
+            if (el.matches(rule.selectorText) && rule.style) {
+              if (rule.style.width || rule.style.minWidth) {
+                matchedW = rule.style.width || rule.style.minWidth;
+              }
+              if (rule.style.height || rule.style.minHeight) {
+                matchedH = rule.style.height || rule.style.minHeight;
+              }
+              if (rule.style.aspectRatio) {
+                matchedAr = rule.style.aspectRatio;
+              }
             }
           } catch (_) {}
         }
@@ -778,14 +841,19 @@ function buildDiagnosticsBridgeScript(
 
     var finalW = wExpr || matchedW;
     var finalH = hExpr || matchedH;
+    var finalAr = arExpr || matchedAr;
 
-    if (!isFixedCssLength(finalW) || !isFixedCssLength(finalH)) {
+    var hasFixedW = isNonResponsiveLength(finalW);
+    var hasFixedH = isNonResponsiveLength(finalH);
+    var hasAspect = Boolean(finalAr && finalAr.trim() && finalAr.trim() !== 'auto');
+
+    if (!((hasFixedW && hasFixedH) || (hasFixedW && hasAspect) || (hasFixedH && hasAspect))) {
       return null;
     }
 
     var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-    var w = Math.round(el.offsetWidth || (rect ? rect.width : 0));
-    var h = Math.round(el.offsetHeight || (rect ? rect.height : 0));
+    var w = Math.round(rect && rect.width ? rect.width : el.offsetWidth || 0);
+    var h = Math.round(rect && rect.height ? rect.height : el.offsetHeight || 0);
     if (w >= 16 && h >= 16) {
       return { width: w, height: h };
     }
@@ -853,19 +921,23 @@ function buildDiagnosticsBridgeScript(
       return { mode: 'fixed', width: bodyCss.width, height: bodyCss.height, source: 'body' };
     }
 
+    var userResponsiveBody = hasResponsiveViewportRule(docEl) || hasResponsiveViewportRule(body);
+    var vw = window.innerWidth || 0;
+    var vh = window.innerHeight || 0;
+
     var rootEl = document.getElementById('root') || document.getElementById('app');
     var candidates = [];
     var namedNodes = document.querySelectorAll('#scene, #stage, #viewport, .scene, .stage, #root, #app, main');
     for (var i = 0; i < namedNodes.length; i++) {
-      candidates.push({ el: namedNodes[i], minSize: 64, source: 'root-container' });
+      candidates.push({ el: namedNodes[i], minSize: 64, source: 'root-container', isNamed: true });
     }
-    for (var b = 0; b < bodyChildren.length; b++) {
-      candidates.push({ el: bodyChildren[b], minSize: bodyChildren.length === 1 ? 64 : 120, source: 'body-child' });
+    if (bodyChildren.length === 1) {
+      candidates.push({ el: bodyChildren[0], minSize: 64, source: 'body-child', isNamed: false });
     }
     if (rootEl) {
       var rootChildren = getMeaningfulChildren(rootEl);
-      for (var rc = 0; rc < rootChildren.length; rc++) {
-        candidates.push({ el: rootChildren[rc], minSize: rootChildren.length === 1 ? 64 : 120, source: 'root-child' });
+      if (rootChildren.length === 1) {
+        candidates.push({ el: rootChildren[0], minSize: 64, source: 'root-child', isNamed: false });
       }
     }
 
@@ -876,6 +948,11 @@ function buildDiagnosticsBridgeScript(
       if (!item.el || (item.el.tagName && item.el.tagName.toLowerCase() === 'canvas')) continue;
       var sz = getExplicitCssSize(item.el);
       if (sz && sz.width >= item.minSize && sz.height >= item.minSize) {
+        // When user explicitly declared responsive 100vw/100vh on html/body (e.g. centered 900x500 hero card),
+        // keep the composition surface unless the inner container actually overflows or is a dedicated scene stage
+        if (userResponsiveBody && sz.width <= vw + 2 && sz.height <= vh + 2) {
+          continue;
+        }
         var area = sz.width * sz.height;
         if (area > bestArea) {
           bestArea = area;
@@ -911,19 +988,18 @@ function buildDiagnosticsBridgeScript(
 
       if (hasExplicitAttrs || hasCustomBuffer) {
         var dpr = window.devicePixelRatio || 1;
-        var vw = window.innerWidth || 0;
-        var vh = window.innerHeight || 0;
         var isLockedSame =
           lockedCanvas === primaryCanvas &&
           lockedCanvasSize &&
           lockedCanvasSize.w === primaryCanvas.width &&
           lockedCanvasSize.h === primaryCanvas.height;
 
+        var isPrebootFixed = window.name === 'tv-fixed';
         var matchesViewport =
           (Math.abs(primaryCanvas.width - vw) <= 3 || Math.abs(primaryCanvas.width / dpr - vw) <= 3) &&
           (Math.abs(primaryCanvas.height - vh) <= 3 || Math.abs(primaryCanvas.height / dpr - vh) <= 3);
 
-        if (isLockedSame || !matchesViewport) {
+        if (isLockedSame || isPrebootFixed || !matchesViewport) {
           lockedCanvas = primaryCanvas;
           lockedCanvasSize = { w: primaryCanvas.width, h: primaryCanvas.height };
           return {
@@ -937,7 +1013,7 @@ function buildDiagnosticsBridgeScript(
     }
 
     // Fallback: if external/unreadable CSS forces explicit large document overflow beyond viewport
-    if (docEl.scrollWidth > (window.innerWidth || 0) + 12 && docEl.scrollHeight > (window.innerHeight || 0) + 12) {
+    if (docEl.scrollWidth > vw + 12 && docEl.scrollHeight > vh + 12) {
       return {
         mode: 'fixed',
         width: Math.round(docEl.scrollWidth),
@@ -1577,7 +1653,7 @@ export function compileSceneBundle(
   const cycles = detectCircularDependencies(graphEdges);
   const headTags = [
     buildDiagnosticsBridgeScript(runId, cycles),
-    `<style data-trenveds-base="1">:where(html,body,#root){margin:0;padding:0;width:100%;height:100%;box-sizing:border-box;overflow:hidden;background:#060608;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif;}</style>`,
+    `<style data-trenveds-base="1">:where(html,body){margin:0;padding:0;width:100%;height:100%;box-sizing:border-box;background:#060608;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif;}:where(#root){margin:0;padding:0;min-width:100%;min-height:100%;box-sizing:border-box;}</style>`,
     autoCssTags,
     buildImportMapScript(importMap),
   ]
@@ -1697,7 +1773,7 @@ export async function compileSceneBundleAsync(
     const runId = fastBundle.runId;
     const headTags = [
       buildDiagnosticsBridgeScript(runId, fastBundle.circularDependencies),
-      `<style data-trenveds-base="1">:where(html,body,#root){margin:0;padding:0;width:100%;height:100%;box-sizing:border-box;overflow:hidden;background:#060608;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif;}</style>`,
+      `<style data-trenveds-base="1">:where(html,body){margin:0;padding:0;width:100%;height:100%;box-sizing:border-box;background:#060608;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif;}:where(#root){margin:0;padding:0;min-width:100%;min-height:100%;box-sizing:border-box;}</style>`,
       standaloneCss,
       bundledCssTag,
       Object.keys(importMap).length > 0 ? buildImportMapScript(importMap) : '',

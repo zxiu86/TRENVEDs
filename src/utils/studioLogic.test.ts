@@ -9,6 +9,7 @@ import {
   detectLanguageFromFilename,
   formatSceneAspectLabel,
   getAspectRatioSpec,
+  inferInitialSceneDimensions,
   sanitizeProjectName,
 } from './studioLogic';
 import {
@@ -759,10 +760,12 @@ test('calculateAdaptiveViewportLayout performs center-based uniform scaling acro
   assert.equal(zoomedOut.displayHeight, 225);
   assert.ok(Math.abs(zoomedOut.scale - (800 / 1920) * 0.5) < 1e-6);
 
-  // Fluid/responsive scene respects Studio aspectRatio selector without CSS scale transform
+  // Fluid/responsive scene runs on Independent Composition Surface (1080x1920 for 9:16) projected into stage
   const fluid = calculateAdaptiveViewportLayout(800, 600, '9:16', 100, true, null);
   assert.equal(fluid.isFixedScene, false);
-  assert.equal(fluid.scale, 1);
+  assert.equal(fluid.sceneWidth, 1080);
+  assert.equal(fluid.sceneHeight, 1920);
+  assert.ok(Math.abs(fluid.scale - 600 / 1920) < 1e-6);
   assert.equal(fluid.displayWidth, 338);
   assert.equal(fluid.displayHeight, 600);
   assert.equal(fluid.aspectLabel, '9:16');
@@ -771,6 +774,33 @@ test('calculateAdaptiveViewportLayout performs center-based uniform scaling acro
   assert.equal(formatSceneAspectLabel(1080, 1920), '9:16');
   assert.equal(formatSceneAspectLabel(1000, 1000), '1:1');
   assert.equal(formatSceneAspectLabel(1440, 1080), '4:3');
+});
+
+test('inferInitialSceneDimensions resolves fixed scenes pre-boot across CSS, min-size, aspect-ratio, SVG, and Canvas without mistaking 100vw cards', () => {
+  assert.deepEqual(
+    inferInitialSceneDimensions('<!doctype html><html><body style="width:3840px;height:2160px"></body></html>'),
+    { width: 3840, height: 2160, mode: 'fixed', source: 'preboot-body' }
+  );
+  assert.deepEqual(
+    inferInitialSceneDimensions('<!doctype html><html><head><style>#stage{min-width:1920px;min-height:1080px}</style></head><body><div id="stage"></div></body></html>'),
+    { width: 1920, height: 1080, mode: 'fixed', source: 'preboot-root-container' }
+  );
+  assert.deepEqual(
+    inferInitialSceneDimensions('<!doctype html><html><head><style>#scene{width:1920px;aspect-ratio:16/9}</style></head><body><div id="scene"></div></body></html>'),
+    { width: 1920, height: 1080, mode: 'fixed', source: 'preboot-root-container' }
+  );
+  assert.deepEqual(
+    inferInitialSceneDimensions('<!doctype html><html><body><svg viewBox="0 0 1200 1500"></svg></body></html>'),
+    { width: 1200, height: 1500, mode: 'fixed', source: 'preboot-svg' }
+  );
+  assert.deepEqual(
+    inferInitialSceneDimensions('<!doctype html><html><body><canvas width="7680" height="4320"></canvas></body></html>'),
+    { width: 7680, height: 4320, mode: 'fixed', source: 'preboot-canvas' }
+  );
+  assert.equal(
+    inferInitialSceneDimensions('<!doctype html><html><head><style>body{width:100vw;height:100vh}#stage{width:900px;height:500px}</style></head><body><div id="stage"></div></body></html>'),
+    null
+  );
 });
 
 test('compileSceneBundle injects scene-dimensions detection observer into runtime bridge', () => {
