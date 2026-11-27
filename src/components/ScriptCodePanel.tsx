@@ -19,6 +19,8 @@ import {
   Copy,
   FileCode2,
   FilePlus2,
+  FolderUp,
+  Image as ImageIcon,
   PanelRightClose,
   Pencil,
   Play,
@@ -28,10 +30,14 @@ import {
 } from 'lucide-react';
 import type { CodeLanguage, SceneFile } from '../types/studio';
 import {
+  detectSceneEntryFile,
   FILE_INPUT_ACCEPT,
   inferFilenameFromCode,
+  isImageAssetPath,
   normalizeScenePath,
   resolveImportConflictName,
+  shouldSkipImportedPath,
+  stripCommonImportRoot,
   validateImportedFile,
 } from '../utils/sceneFiles';
 import { detectLanguageFromFilename } from '../utils/studioLogic';
@@ -188,11 +194,15 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
   const [newFilenameInput, setNewFilenameInput] = useState('');
   const [newCodeInput, setNewCodeInput] = useState('');
 
+  const [isDragOver, setIsDragOver] = useState(false);
+
   // Inline Rename state
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const dragDepthRef = useRef(0);
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
   const languageCompartmentRef = useRef(new Compartment());
@@ -416,10 +426,73 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
     }
   };
 
-  const handleImportFilesSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const selected = Array.from(event.target.files ?? []);
-    event.target.value = '';
-    if (selected.length === 0) return;
+  const readFileAsDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      reader.onerror = () => reject(new Error(`Failed to read image asset "${file.name}".`));
+      reader.readAsDataURL(file);
+    });
+
+  const collectEntriesRecursively = async (
+    entry: FileSystemEntry,
+    parentPath: string
+  ): Promise<Array<{ file: File; relativePath: string }>> => {
+    if (entry.isFile) {
+      const fileEntry = entry as FileSystemFileEntry;
+      const file = await new Promise<File>((resolve, reject) => {
+        fileEntry.file(resolve, reject);
+      });
+      const relativePath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+      return [{ file, relativePath }];
+    }
+
+    if (entry.isDirectory) {
+      const dirEntry = entry as FileSystemDirectoryEntry;
+      const dirPath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+      if (shouldSkipImportedPath(`${dirPath}/placeholder.js`)) {
+        return [];
+      }
+      const reader = dirEntry.createReader();
+      const allEntries: FileSystemEntry[] = [];
+      // Chromium readEntries yields up to 100 entries per call
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => {
+          reader.readEntries(resolve, reject);
+        });
+        if (!batch || batch.length === 0) break;
+        allEntries.push(...batch);
+      }
+      const nested = await Promise.all(
+        allEntries.map((child) => collectEntriesRecursively(child, dirPath))
+      );
+      return nested.flat();
+    }
+
+    return [];
+  };
+
+  const processImportedPairs = async (
+    rawPairs: Array<{ file: File; relativePath: string }>,
+    fromFolderOrDrop: boolean
+  ) => {
+    const filteredPairs = rawPairs.filter((pair) => !shouldSkipImportedPath(pair.relativePath));
+    const skippedCount = rawPairs.length - filteredPairs.length;
+
+    if (filteredPairs.length === 0) {
+      if (skippedCount > 0) {
+        setNotice({
+          tone: 'warning',
+          message: 'Skipped build/dependency folders (node_modules, .git, dist). Select source files to import.',
+        });
+      }
+      return;
+    }
+
+    const strippedPaths = fromFolderOrDrop
+      ? stripCommonImportRoot(filteredPairs.map((pair) => pair.relativePath))
+      : filteredPairs.map((pair) => normalizeScenePath(pair.relativePath));
 
     const cleanImports: Array<{ path: string; content: string; description?: string }> = [];
     const nextConflicts: PendingImportConflict[] = [];
@@ -427,12 +500,16 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
     const warnings: string[] = [];
     const existingSet = new Set(files.map((f) => f.path.toLowerCase()));
 
-    for (const file of selected) {
+    for (let idx = 0; idx < filteredPairs.length; idx += 1) {
+      const { file } = filteredPairs[idx];
+      const targetPath = strippedPaths[idx] || file.name;
       try {
-        const text = await file.text();
-        const validation = validateImportedFile(file.name, text, file.size);
+        const content = isImageAssetPath(targetPath)
+          ? await readFileAsDataUrl(file)
+          : await file.text();
+        const validation = validateImportedFile(targetPath, content, file.size);
         if (!validation.valid) {
-          errors.push(validation.error ?? `Rejected "${file.name}".`);
+          errors.push(validation.error ?? `Rejected "${targetPath}".`);
           continue;
         }
         if (validation.warning) {
@@ -448,24 +525,36 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
             id: `conf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
             targetPath: validation.normalizedPath,
             suggestedRenamePath: resolveImportConflictName(virtualPool, validation.normalizedPath),
-            content: text,
+            content,
             description: `Imported ${validation.normalizedPath}`,
           });
         } else {
           existingSet.add(validation.normalizedPath.toLowerCase());
           cleanImports.push({
             path: validation.normalizedPath,
-            content: text,
+            content,
             description: `Imported ${validation.normalizedPath}`,
           });
         }
       } catch {
-        errors.push(`Failed to read "${file.name}".`);
+        errors.push(`Failed to read "${targetPath}".`);
       }
     }
 
     if (cleanImports.length > 0) {
-      onUpsertFiles(cleanImports, cleanImports[0].path);
+      const mergedPool: SceneFile[] = [
+        ...files,
+        ...cleanImports.map((item) => ({ path: item.path, content: item.content, updatedAt: '' })),
+      ];
+      const detectedEntry =
+        cleanImports.length > 1
+          ? detectSceneEntryFile(mergedPool)
+          : null;
+      const nextActive =
+        detectedEntry && cleanImports.some((item) => item.path === detectedEntry.path)
+          ? detectedEntry.path
+          : cleanImports[0].path;
+      onUpsertFiles(cleanImports, nextActive);
     }
 
     if (nextConflicts.length > 0) {
@@ -473,14 +562,102 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
     }
 
     if (errors.length > 0) {
-      setNotice({ tone: 'error', message: errors.join(' ') });
+      const previewErrors = errors.slice(0, 3).join(' ');
+      const extraNote = errors.length > 3 ? ` (+${errors.length - 3} more)` : '';
+      setNotice({ tone: 'error', message: `${previewErrors}${extraNote}` });
     } else if (warnings.length > 0) {
-      setNotice({ tone: 'warning', message: warnings.join(' ') });
+      setNotice({ tone: 'warning', message: warnings.slice(0, 3).join(' ') });
     } else if (cleanImports.length > 0) {
       setNotice({
         tone: 'info',
-        message: `Imported ${cleanImports.length} ${cleanImports.length === 1 ? 'file' : 'files'}. Click Run to execute in Viewport.`,
+        message: `Imported ${cleanImports.length} ${cleanImports.length === 1 ? 'file' : 'files'}${
+          skippedCount > 0 ? ` (${skippedCount} ignored)` : ''
+        }. Click Run to execute in Viewport.`,
       });
+    }
+  };
+
+  const handleImportFilesSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    if (selected.length === 0) return;
+    await processImportedPairs(
+      selected.map((file) => ({
+        file,
+        relativePath: file.webkitRelativePath || file.name,
+      })),
+      selected.some((f) => Boolean(f.webkitRelativePath && f.webkitRelativePath.includes('/')))
+    );
+  };
+
+  const handleImportFolderSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    if (selected.length === 0) return;
+    await processImportedPairs(
+      selected.map((file) => ({
+        file,
+        relativePath: file.webkitRelativePath || file.name,
+      })),
+      true
+    );
+  };
+
+  const handleDragEnter = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current += 1;
+    if (event.dataTransfer?.types?.includes('Files')) {
+      setIsDragOver(true);
+    }
+  };
+
+  const handleDragOver = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'copy';
+    }
+  };
+
+  const handleDragLeave = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragOver(false);
+    }
+  };
+
+  const handleDrop = async (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepthRef.current = 0;
+    setIsDragOver(false);
+
+    const items = Array.from(event.dataTransfer?.items ?? []);
+    const entries = items
+      .map((item) => (typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null))
+      .filter((entry): entry is FileSystemEntry => entry !== null);
+
+    if (entries.length > 0) {
+      const collected = (
+        await Promise.all(entries.map((entry) => collectEntriesRecursively(entry, '')))
+      ).flat();
+      const hasDirs = entries.some((entry) => entry.isDirectory);
+      await processImportedPairs(collected, hasDirs);
+      return;
+    }
+
+    const droppedFiles = Array.from(event.dataTransfer?.files ?? []);
+    if (droppedFiles.length > 0) {
+      await processImportedPairs(
+        droppedFiles.map((file) => ({
+          file,
+          relativePath: file.webkitRelativePath || file.name,
+        })),
+        false
+      );
     }
   };
 
@@ -507,6 +684,28 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
     }
 
     setConflicts((prev) => prev.filter((c) => c.id !== conflictId));
+  };
+
+  const resolveAllConflicts = (mode: 'replace' | 'skip') => {
+    if (conflicts.length === 0) return;
+    if (mode === 'replace') {
+      const incoming = conflicts.map((c) => ({
+        path: c.targetPath,
+        content: c.content,
+        description: c.description,
+      }));
+      const merged: SceneFile[] = [
+        ...files.filter((f) => !incoming.some((i) => i.path === f.path)),
+        ...incoming.map((i) => ({ path: i.path, content: i.content, updatedAt: '' })),
+      ];
+      const nextEntry = detectSceneEntryFile(merged)?.path ?? incoming[0].path;
+      onUpsertFiles(incoming, nextEntry);
+      setNotice({
+        tone: 'info',
+        message: `Replaced ${incoming.length} existing ${incoming.length === 1 ? 'file' : 'files'}. Click Run to update Viewport.`,
+      });
+    }
+    setConflicts([]);
   };
 
   const handlePasteFromClipboardToComposer = async () => {
@@ -620,7 +819,13 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
   return (
     <section
       aria-label="AI Script Code Editor"
-      className="studio-glass crimson-edge-right flex h-full min-h-0 flex-col overflow-hidden rounded-xl transition-all duration-200 ease-out"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`studio-glass crimson-edge-right relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl transition-all duration-200 ease-out ${
+        isDragOver ? 'ring-1 ring-red-500/75 bg-red-950/10' : ''
+      }`}
     >
       <input
         ref={fileInputRef}
@@ -631,9 +836,23 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
         data-testid="script-file-import-input"
         className="hidden"
       />
+      <input
+        ref={(el) => {
+          folderInputRef.current = el;
+          if (el) {
+            el.setAttribute('webkitdirectory', '');
+            el.setAttribute('directory', '');
+          }
+        }}
+        type="file"
+        multiple
+        onChange={handleImportFolderSelected}
+        data-testid="script-folder-import-input"
+        className="hidden"
+      />
 
       {/* Panel Header */}
-      <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] px-3">
+      <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-white/[0.08] px-2.5">
         <div className="flex items-center gap-1.5 min-w-0 shrink-0">
           <Code2 className="h-3.5 w-3.5 shrink-0 text-red-400" />
           <h2 className="font-display text-xs font-semibold tracking-wide text-zinc-100 whitespace-nowrap">
@@ -671,10 +890,22 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
             data-testid="script-import-button"
             aria-label="Import code files"
             title="Import files from computer"
-            className="studio-glass-control inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-[11px] font-medium text-zinc-200 transition-colors hover:border-white/25 hover:bg-white/10 hover:text-white whitespace-nowrap"
+            className="studio-glass-control inline-flex h-7 w-7 2xl:w-auto 2xl:px-2 items-center justify-center gap-1 rounded-md text-[11px] font-medium text-zinc-200 transition-colors hover:border-white/25 hover:bg-white/10 hover:text-white whitespace-nowrap"
           >
             <Upload className="h-3 w-3 shrink-0" />
-            <span className="hidden 2xl:inline">Import</span>
+            <span className="hidden 2xl:inline">Files</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => folderInputRef.current?.click()}
+            data-testid="script-import-folder-button"
+            aria-label="Import project folder"
+            title="Import project folder"
+            className="studio-glass-control inline-flex h-7 w-7 2xl:w-auto 2xl:px-2 items-center justify-center gap-1 rounded-md text-[11px] font-medium text-zinc-200 transition-colors hover:border-white/25 hover:bg-white/10 hover:text-white whitespace-nowrap"
+          >
+            <FolderUp className="h-3 w-3 shrink-0" />
+            <span className="hidden 2xl:inline">Folder</span>
           </button>
 
           <button
@@ -684,7 +915,7 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
             aria-label="New or paste file"
             aria-expanded={isNewComposerOpen}
             title="Create a new file or paste code"
-            className={`studio-glass-control inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-[11px] font-medium transition-colors whitespace-nowrap ${
+            className={`studio-glass-control inline-flex h-7 w-7 2xl:w-auto 2xl:px-2 items-center justify-center gap-1 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap ${
               isNewComposerOpen
                 ? 'border-red-500/50 bg-red-600/20 text-white'
                 : 'text-zinc-200 hover:border-white/25 hover:bg-white/10 hover:text-white'
@@ -817,8 +1048,31 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
       {conflicts.length > 0 && (
         <div
           data-testid="import-conflict-banner"
-          className="shrink-0 border-b border-amber-500/35 bg-amber-500/[0.08] px-3 py-2 space-y-2"
+          className="shrink-0 border-b border-amber-500/35 bg-amber-500/[0.08] px-3 py-2 space-y-2 max-h-40 overflow-y-auto studio-scroll"
         >
+          {conflicts.length > 1 && (
+            <div className="flex items-center justify-between gap-2 pb-1 border-b border-amber-500/20 text-[10px]">
+              <span className="font-medium text-amber-200">
+                {conflicts.length} file conflicts detected
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => resolveAllConflicts('replace')}
+                  className="rounded border border-red-500/45 bg-red-600/25 px-2 py-0.5 font-medium text-red-100 hover:bg-red-600/40"
+                >
+                  Replace All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => resolveAllConflicts('skip')}
+                  className="rounded border border-white/10 bg-white/[0.04] px-2 py-0.5 text-zinc-300 hover:bg-white/10"
+                >
+                  Skip All
+                </button>
+              </div>
+            </div>
+          )}
           {conflicts.map((conflict) => (
             <div
               key={conflict.id}
@@ -978,15 +1232,41 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
         </div>
       )}
 
-      {/* CodeMirror 6 Live Editor or Empty Workspace Callout */}
+      {/* CodeMirror 6 Live Editor, Asset Viewer, or Empty Workspace Callout */}
       <div className="relative flex-1 min-h-0 min-w-0 overflow-hidden">
         <div
           ref={editorHostRef}
           data-testid="code-viewer-body"
           data-language={detectedLanguage.id}
           data-filename={activeFile?.path ?? ''}
-          className={`h-full w-full ${files.length === 0 ? 'invisible pointer-events-none' : ''}`}
+          className={`h-full w-full ${
+            files.length === 0 || (activeFile && isImageAssetPath(activeFile.path))
+              ? 'invisible pointer-events-none'
+              : ''
+          }`}
         />
+
+        {activeFile && isImageAssetPath(activeFile.path) && (
+          <div
+            data-testid="asset-preview-viewer"
+            className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#06070B]/85 p-6 text-center"
+          >
+            <div className="max-h-48 max-w-full overflow-hidden rounded-lg border border-white/10 bg-black/50 p-2">
+              <img
+                src={activeFile.content}
+                alt={activeFile.path}
+                className="max-h-44 max-w-full object-contain"
+              />
+            </div>
+            <div className="flex items-center gap-1.5 text-[11px] font-mono text-zinc-300">
+              <ImageIcon className="h-3.5 w-3.5 text-red-400" />
+              <span>{activeFile.path}</span>
+            </div>
+            <p className="max-w-[260px] text-[11px] text-zinc-500">
+              Binary image asset stored in workspace and available via relative imports or HTML <code className="text-zinc-300">&lt;img src&gt;</code>.
+            </p>
+          </div>
+        )}
 
         {files.length === 0 && (
           <div
@@ -999,8 +1279,8 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
             <p className="mt-3 font-display text-xs font-semibold text-zinc-200">
               No scene files yet
             </p>
-            <p className="mt-1.5 max-w-[240px] text-[11px] leading-relaxed text-zinc-500">
-              Ask AI Direction to build a scene, or import existing code files and paste code directly here.
+            <p className="mt-1.5 max-w-[250px] text-[11px] leading-relaxed text-zinc-500">
+              Ask AI Direction to build a scene, drag &amp; drop a project folder here, or import files and paste code directly.
             </p>
             <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
               <button
@@ -1013,6 +1293,14 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
               </button>
               <button
                 type="button"
+                onClick={() => folderInputRef.current?.click()}
+                className="studio-glass-control inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[11px] font-medium text-zinc-200 hover:border-red-500/40 hover:text-white"
+              >
+                <FolderUp className="h-3.5 w-3.5 text-red-400" />
+                <span>Import Folder</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => setIsNewComposerOpen(true)}
                 className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-red-500/45 bg-red-600/20 px-3 text-[11px] font-medium text-white hover:bg-red-600/35"
               >
@@ -1020,6 +1308,21 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
                 <span>Paste / New File</span>
               </button>
             </div>
+          </div>
+        )}
+
+        {isDragOver && (
+          <div
+            data-testid="script-drop-overlay"
+            className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center rounded-xl border border-dashed border-red-500/70 bg-[#090A10]/85 backdrop-blur-sm text-center"
+          >
+            <FolderUp className="h-6 w-6 text-red-400" />
+            <p className="mt-2 font-display text-xs font-semibold text-zinc-100">
+              Drop files or project folder
+            </p>
+            <p className="mt-1 text-[11px] text-zinc-400">
+              Folder structure and relative imports are preserved automatically
+            </p>
           </div>
         )}
       </div>
@@ -1037,7 +1340,11 @@ export const ScriptCodePanel: React.FC<ScriptCodePanelProps> = ({
           data-testid="detected-language-label"
           className="font-mono tabular-nums shrink-0"
         >
-          {activeFile ? `${detectedLanguage.label} · ${lineCount} lines` : '0 files'}
+          {activeFile
+            ? isImageAssetPath(activeFile.path)
+              ? detectedLanguage.label
+              : `${detectedLanguage.label} · ${lineCount} lines`
+            : '0 files'}
         </span>
       </div>
     </section>

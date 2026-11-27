@@ -284,6 +284,12 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
             <span
               data-testid="runtime-status-badge"
               data-status={runtimeStatus}
+              data-runtime-mode={compiledBundle?.runtimeMode ?? ''}
+              title={
+                compiledBundle?.entryPath
+                  ? `Entry: ${compiledBundle.entryPath} (${compiledBundle.runtimeMode})`
+                  : undefined
+              }
               className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-mono ${
                 runtimeStatus === 'running'
                   ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-300'
@@ -407,15 +413,21 @@ export const SceneViewport: React.FC<SceneViewportProps> = ({
               <div
                 data-testid="runtime-error-overlay"
                 role="alert"
-                className="studio-glass-elevated absolute inset-x-3 bottom-3 z-20 rounded-lg border border-red-500/45 px-3 py-2 text-xs text-red-200"
+                className="studio-glass-elevated absolute inset-x-3 bottom-3 z-20 max-h-[42%] overflow-y-auto studio-scroll rounded-lg border border-red-500/45 px-3 py-2 text-xs text-red-200"
               >
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium text-red-100">Scene Runtime Diagnostic</p>
-                    <p className="mt-0.5 text-[11px] text-red-200/90 break-words">
-                      {runtimeDiagnostics[0].message}
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <p className="font-medium text-red-100">
+                      Scene Runtime Diagnostic
+                      {runtimeDiagnostics.length > 1 ? ` (${runtimeDiagnostics.length})` : ''}
                     </p>
+                    {runtimeDiagnostics.slice(0, 3).map((diag) => (
+                      <p key={diag.id} className="text-[11px] text-red-200/90 break-words">
+                        {diag.source ? <span className="font-mono text-red-300">{diag.source}{diag.line ? `:${diag.line}` : ''}: </span> : null}
+                        {diag.message}
+                      </p>
+                    ))}
                   </div>
                 </div>
               </div>

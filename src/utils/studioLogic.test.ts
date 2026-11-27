@@ -13,14 +13,26 @@ import {
   applyFileOperations,
   detectSceneEntryFile,
   extractSceneExternalDependencies,
+  hasCommonJsSyntax,
+  hasRealEsmSyntax,
   inferFilenameFromCode,
+  maskCommentsAndStrings,
   normalizeScenePath,
   resolveImportConflictName,
   resolveRelativeModulePath,
+  scanModuleSpecifiers,
+  shouldSkipImportedPath,
+  stripCommonImportRoot,
   validateImportedFile,
 } from './sceneFiles';
 import { auditSceneWorkspace, detectDiagnosticIntent, shouldUseWebResearch } from './sceneDiagnostics';
-import { compileSceneBundle, resolveExternalPackageUrl } from '../runtime/sceneBundler';
+import {
+  compileSceneBundle,
+  detectCircularDependencies,
+  getIncompatibilityReason,
+  resolveExternalPackageUrl,
+  selectRuntimeMode,
+} from '../runtime/sceneBundler';
 import {
   classifyProviderError,
   discoverProviderModels,
@@ -497,3 +509,161 @@ test('parseAiBrainResponse and buildWorkspaceContextPrompt preserve deep diagnos
   assert.match(repairContext, /PREVIOUS FAILED REPAIR ATTEMPTS \(DO NOT REPEAT THESE APPROACHES\)/);
   assert.match(repairContext, /Renamed Ring\.js to Ring\.jsx/);
 });
+
+test('V1.4 lexical scanner avoids false-positive ESM triggers in classic scripts and parses multiline imports', () => {
+  const classicScript = `
+    // Note: export your animation result later
+    const label = "import asset from gallery";
+    window.Stage = { run: () => label };
+  `;
+  assert.equal(hasRealEsmSyntax(classicScript), false);
+  assert.match(maskCommentsAndStrings(classicScript), /window\.Stage/);
+
+  const multilineEsm = `
+    import {
+      easeInOutCubic,
+      clamp as clampNum
+    } from '../utils/easing.js';
+    export * from './effects.js';
+    export type { Foo } from './types';
+  `;
+  assert.equal(hasRealEsmSyntax(multilineEsm), true);
+  const specs = scanModuleSpecifiers(multilineEsm);
+  assert.deepEqual(
+    specs.map((s) => ({ spec: s.specifier, typeOnly: s.isTypeOnly })),
+    [
+      { spec: '../utils/easing.js', typeOnly: false },
+      { spec: './effects.js', typeOnly: false },
+      { spec: './types', typeOnly: true },
+    ]
+  );
+
+  assert.equal(hasCommonJsSyntax('const helper = require("./helper"); module.exports = { helper };'), true);
+  assert.equal(hasCommonJsSyntax('console.log("require(\'./not-code\')");'), false);
+});
+
+test('V1.4 selectRuntimeMode and compileSceneBundle preserve classic multi-script HTML natively', () => {
+  const classicHtmlProject: SceneFile[] = [
+    {
+      path: 'index.html',
+      content:
+        '<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><div id="stage"></div><script src="background.js"></script><script src="main.js"></script></body></html>',
+      updatedAt: '',
+    },
+    {
+      path: 'styles.css',
+      content: 'body { background: #101018; }',
+      updatedAt: '',
+    },
+    {
+      path: 'background.js',
+      content: '// import & export comment should not break classic global scope\nwindow.BG_LABEL = "CRIMSON_BG";',
+      updatedAt: '',
+    },
+    {
+      path: 'main.js',
+      content: 'document.getElementById("stage").textContent = window.BG_LABEL;',
+      updatedAt: '',
+    },
+  ];
+
+  const entry = detectSceneEntryFile(classicHtmlProject);
+  assert.equal(selectRuntimeMode(classicHtmlProject, entry), 'native-html');
+
+  const bundle = compileSceneBundle(classicHtmlProject, { runId: 'classic_test' });
+  assert.equal(bundle.diagnostics.length, 0);
+  assert.equal(bundle.runtimeMode, 'native-html');
+  assert.match(bundle.html, /<style data-vfs="styles\.css">/);
+  assert.match(bundle.html, /<script data-vfs="background\.js">/);
+  assert.match(bundle.html, /<script data-vfs="main\.js">/);
+  assert.doesNotMatch(bundle.html, /<script type="module"/);
+});
+
+test('V1.4 inter-file resolution supports bare HTML paths, nested folders, TS .js->.ts convention, @/ aliases, and CSS @import', () => {
+  const project: SceneFile[] = [
+    {
+      path: 'index.html',
+      content:
+        '<!doctype html><html><head><link rel="stylesheet" href="styles/main.css"></head><body><canvas id="c"></canvas><script type="module" src="src/main.ts"></script></body></html>',
+      updatedAt: '',
+    },
+    {
+      path: 'styles/tokens.css',
+      content: ':root { --crimson: #dc2626; }',
+      updatedAt: '',
+    },
+    {
+      path: 'styles/main.css',
+      content: '@import "./tokens.css";\nbody { color: var(--crimson); }',
+      updatedAt: '',
+    },
+    {
+      path: 'src/utils/easing.ts',
+      content: 'export function ease(t: number): number { return t * t; }',
+      updatedAt: '',
+    },
+    {
+      path: 'src/scenes/intro.ts',
+      content: 'import { ease } from "../utils/easing.js";\nexport * from "@/utils/easing";\nexport function runIntro() { return ease(0.5); }',
+      updatedAt: '',
+    },
+    {
+      path: 'src/main.ts',
+      content: 'import { runIntro } from "./scenes/intro";\nconsole.log(runIntro());',
+      updatedAt: '',
+    },
+  ];
+
+  // Resolve TS .js convention & @/ alias directly
+  assert.equal(resolveRelativeModulePath('src/scenes/intro.ts', '../utils/easing.js', project)?.path, 'src/utils/easing.ts');
+  assert.equal(resolveRelativeModulePath('src/scenes/intro.ts', '@/utils/easing', project)?.path, 'src/utils/easing.ts');
+
+  const bundle = compileSceneBundle(project, { runId: 'nested_ts_test' });
+  assert.equal(bundle.diagnostics.length, 0);
+  assert.match(bundle.html, /--crimson: #dc2626/);
+  assert.match(bundle.html, /@trenveds\/src\/main\.ts/);
+  assert.match(bundle.html, /@trenveds\/src\/scenes\/intro\.ts/);
+  assert.match(bundle.html, /@trenveds\/src\/utils\/easing\.ts/);
+});
+
+test('V1.4 detects circular dependencies, Node/server incompatibilities, non-web entries, and strips folder roots safely', () => {
+  const edges = new Map<string, Set<string>>([
+    ['a.js', new Set(['b.js'])],
+    ['b.js', new Set(['a.js'])],
+  ]);
+  const cycles = detectCircularDependencies(edges);
+  assert.equal(cycles.length, 1);
+  assert.deepEqual(cycles[0], ['a.js', 'b.js', 'a.js']);
+
+  const cyclicFiles: SceneFile[] = [
+    { path: 'a.js', content: 'import { b } from "./b.js"; export const a = () => b;', updatedAt: '' },
+    { path: 'b.js', content: 'import { a } from "./a.js"; export const b = () => a;', updatedAt: '' },
+  ];
+  const audit = auditSceneWorkspace(cyclicFiles);
+  assert.ok(audit.issues.some((i) => i.id.startsWith('circular-dep-') && i.severity === 'warning'));
+
+  assert.ok(getIncompatibilityReason('fs')?.includes('server runtime'));
+  assert.ok(getIncompatibilityReason('express')?.includes('incompatible with the browser'));
+  assert.equal(getIncompatibilityReason('three'), null);
+
+  const serverImportBundle = compileSceneBundle([
+    { path: 'main.js', content: 'import fs from "fs"; console.log(fs);', updatedAt: '' },
+  ]);
+  assert.equal(serverImportBundle.diagnostics[0]?.type, 'dependency-error');
+  assert.match(serverImportBundle.diagnostics[0]?.message ?? '', /server runtime/);
+
+  const pythonBundle = compileSceneBundle([
+    { path: 'script.py', content: 'print("hello")', updatedAt: '' },
+  ]);
+  assert.equal(pythonBundle.diagnostics[0]?.type, 'compile-error');
+  assert.match(pythonBundle.diagnostics[0]?.message ?? '', /not an executable web scene entrypoint/);
+
+  assert.deepEqual(
+    stripCommonImportRoot(['My Animation/index.html', 'My Animation/sub/character.js']),
+    ['index.html', 'sub/character.js']
+  );
+  assert.equal(shouldSkipImportedPath('My Animation/node_modules/three/index.js'), true);
+  assert.equal(shouldSkipImportedPath('My Animation/.git/HEAD'), true);
+  assert.equal(shouldSkipImportedPath('My Animation/src/App.tsx'), false);
+});
+

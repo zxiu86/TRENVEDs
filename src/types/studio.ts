@@ -71,9 +71,17 @@ export interface DependencyStatus {
   error?: string;
 }
 
+export type RuntimeMode =
+  | 'native-html'
+  | 'native-esm'
+  | 'sucrase-esm'
+  | 'esbuild-bundle'
+  | 'svg';
+
 export interface RuntimeDiagnostic {
   id: string;
   type: 'compile-error' | 'dependency-error' | 'runtime-error' | 'console-error';
+  severity?: 'error' | 'warning';
   message: string;
   source?: string;
   line?: number;

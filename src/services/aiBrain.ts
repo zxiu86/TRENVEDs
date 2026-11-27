@@ -1,5 +1,5 @@
 import {
-  compileSceneBundle,
+  compileSceneBundleAsync,
   prepareSceneDependencies,
   type CompiledSceneBundle,
 } from '../runtime/sceneBundler';
@@ -736,9 +736,9 @@ export async function executeAiSceneTurn(
         pushStep('dependencies', 'No external npm packages required', 'done');
       }
 
-      // Compile scene bundle
+      // Compile scene bundle via multi-path runtime (Native HTML/ESM, Sucrase, or esbuild-wasm)
       pushStep('compile', 'Compiling scene modules', 'running');
-      const bundle = compileSceneBundle(workingFiles, {
+      const bundle = await compileSceneBundleAsync(workingFiles, {
         aspectRatio: params.aspectRatio,
         frameRate: params.frameRate,
         preparedDependencies: deps,
@@ -752,7 +752,8 @@ export async function executeAiSceneTurn(
         timestamp: new Date().toISOString(),
       }));
 
-      const preRuntimeErrors = [...depDiagnostics, ...bundle.diagnostics];
+      const fatalBundleErrors = bundle.diagnostics.filter((d) => d.severity !== 'warning');
+      const preRuntimeErrors = [...depDiagnostics, ...fatalBundleErrors];
       if (preRuntimeErrors.length > 0) {
         pushStep(
           'compile',
@@ -762,7 +763,7 @@ export async function executeAiSceneTurn(
         );
         activeDiagnostics = preRuntimeErrors;
       } else {
-        pushStep('compile', `Compiled entry ${bundle.entryPath}`, 'done');
+        pushStep('compile', `Compiled entry ${bundle.entryPath} (${bundle.runtimeMode})`, 'done');
         pushStep('runtime', 'Starting isolated scene runtime', 'running');
         const runtimeErrors = await params.mountAndVerifyRuntime(bundle);
         activeDiagnostics = runtimeErrors;

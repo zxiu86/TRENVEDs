@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clapperboard, Code2, MessageSquare } from 'lucide-react';
 import {
-  compileSceneBundle,
+  compileSceneBundleAsync,
   prepareSceneDependencies,
   type CompiledSceneBundle,
 } from '../runtime/sceneBundler';
@@ -89,6 +89,7 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
   const abortControllerRef = useRef<AbortController | null>(null);
   const pendingVerificationRef = useRef<PendingRuntimeVerification | null>(null);
   const initializedProjectIdRef = useRef<string | null>(null);
+  const manualRunSeqRef = useRef(0);
 
   const currentFilesSignature = useMemo(
     () => computeFilesSignature(project.files),
@@ -144,15 +145,41 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
       return;
     }
 
-    const savedSig = computeFilesSignature(project.files);
-    const bundle = compileSceneBundle(project.files, {
-      aspectRatio: project.aspectRatio,
-      frameRate: project.frameRate,
-    });
-    setCompiledBundle(bundle);
-    setRuntimeDiagnostics(bundle.diagnostics);
-    setRuntimeStatus(bundle.diagnostics.length > 0 ? 'error' : 'compiling');
-    setLastExecutedSignature(savedSig);
+    let cancelled = false;
+    const savedFiles = project.files;
+    const savedSig = computeFilesSignature(savedFiles);
+    setRuntimeDiagnostics([]);
+    setRuntimeStatus('preparing');
+
+    (async () => {
+      const deps = await prepareSceneDependencies(savedFiles);
+      const depErrors: RuntimeDiagnostic[] = deps
+        .filter((d) => d.status === 'failed')
+        .map((d) => ({
+          id: `dep_${d.name}`,
+          type: 'dependency-error',
+          message: d.error ?? `Failed to load package ${d.name}`,
+          timestamp: new Date().toISOString(),
+        }));
+
+      const bundle = await compileSceneBundleAsync(savedFiles, {
+        aspectRatio: project.aspectRatio,
+        frameRate: project.frameRate,
+        preparedDependencies: deps,
+      });
+
+      if (cancelled) return;
+      const fatalBundleErrors = bundle.diagnostics.filter((d) => d.severity !== 'warning');
+      const allErrors = [...depErrors, ...fatalBundleErrors];
+      setCompiledBundle(bundle);
+      setRuntimeDiagnostics(allErrors);
+      setRuntimeStatus(allErrors.length > 0 ? 'error' : 'compiling');
+      setLastExecutedSignature(savedSig);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [project.id, project.files, project.aspectRatio, project.frameRate]);
 
   const handleRenameProject = (nextName: string) => {
@@ -339,12 +366,18 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
   const handleReloadScene = useCallback(async () => {
     const current = projectRef.current;
     if (current.files.length === 0) return;
+    const runSeq = ++manualRunSeqRef.current;
+    const runFiles = [...current.files];
+    const runSig = computeFilesSignature(runFiles);
+
     setIsManualRunning(true);
     setRuntimeDiagnostics([]);
     setRuntimeStatus('preparing');
 
     try {
-      const deps = await prepareSceneDependencies(current.files);
+      const deps = await prepareSceneDependencies(runFiles);
+      if (runSeq !== manualRunSeqRef.current) return;
+
       const depErrors: RuntimeDiagnostic[] = deps
         .filter((d) => d.status === 'failed')
         .map((d) => ({
@@ -354,20 +387,24 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
           timestamp: new Date().toISOString(),
         }));
 
-      const bundle = compileSceneBundle(projectRef.current.files, {
+      const bundle = await compileSceneBundleAsync(runFiles, {
         aspectRatio: projectRef.current.aspectRatio,
         frameRate: projectRef.current.frameRate,
         preparedDependencies: deps,
       });
+      if (runSeq !== manualRunSeqRef.current) return;
 
-      const allErrors = [...depErrors, ...bundle.diagnostics];
+      const fatalBundleErrors = bundle.diagnostics.filter((d) => d.severity !== 'warning');
+      const allErrors = [...depErrors, ...fatalBundleErrors];
       setRuntimeDiagnostics(allErrors);
       setRuntimeStatus(allErrors.length > 0 ? 'error' : 'compiling');
       setCompiledBundle(bundle);
-      setLastExecutedSignature(computeFilesSignature(projectRef.current.files));
+      setLastExecutedSignature(runSig);
       setReloadNonce((n) => n + 1);
     } finally {
-      setIsManualRunning(false);
+      if (runSeq === manualRunSeqRef.current) {
+        setIsManualRunning(false);
+      }
     }
   }, []);
 

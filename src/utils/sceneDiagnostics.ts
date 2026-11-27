@@ -5,8 +5,12 @@ import {
   extractBareSpecifiersFromCode,
   extractSceneExternalDependencies,
   resolveRelativeModulePath,
+  scanModuleSpecifiers,
 } from './sceneFiles';
-import { resolveExternalPackageUrl } from '../runtime/sceneBundler';
+import {
+  detectCircularDependencies,
+  resolveExternalPackageUrl,
+} from '../runtime/sceneBundler';
 
 export interface WorkspaceIssue {
   id: string;
@@ -23,9 +27,6 @@ export interface WorkspaceAuditReport {
   issues: WorkspaceIssue[];
   summary: string;
 }
-
-const RELATIVE_IMPORT_RE =
-  /(?:import\s+(?:[^'"]*?\s+from\s+)?|export\s+[^'"]*?\s+from\s+|import\s*\(\s*)['"]((?:\.\.?\/|\/)[^'"]+)['"]/g;
 
 function hasProbableJsxSyntax(code: string): boolean {
   return /\breturn\s*\(?\s*<[A-Za-z][A-Za-z0-9]*(?:\s|>|\/>)/.test(code) ||
@@ -118,11 +119,16 @@ export function auditSceneWorkspace(files: SceneFile[]): WorkspaceAuditReport {
     }
 
     if (/\.(js|mjs|cjs|ts|mts|cts|jsx|tsx)$/i.test(lower)) {
-      RELATIVE_IMPORT_RE.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = RELATIVE_IMPORT_RE.exec(file.content)) !== null) {
-        const spec = match[1];
-        if (spec && !resolveRelativeModulePath(file.path, spec, files)) {
+      for (const match of scanModuleSpecifiers(file.content)) {
+        if (match.isTypeOnly) continue;
+        const spec = match.specifier.trim();
+        const isRelativeOrAlias =
+          spec.startsWith('./') ||
+          spec.startsWith('../') ||
+          spec.startsWith('/') ||
+          spec.startsWith('@/') ||
+          spec.startsWith('~/');
+        if (isRelativeOrAlias && !resolveRelativeModulePath(file.path, spec, files)) {
           issues.push({
             id: `missing-import-${file.path}-${spec}`,
             severity: 'error',
@@ -140,8 +146,10 @@ export function auditSceneWorkspace(files: SceneFile[]): WorkspaceAuditReport {
             id: `invalid-pkg-${file.path}-${bare}`,
             severity: 'error',
             file: file.path,
-            message: `Unsupported or malformed package import "${bare}" in ${file.path}.`,
-            suggestion: `Replace "${bare}" with a valid npm package or browser API.`,
+            message:
+              resolved.incompatibilityReason ??
+              `Unsupported or malformed package import "${bare}" in ${file.path}.`,
+            suggestion: `Replace "${bare}" with a browser-compatible npm package or Web API.`,
           });
         }
       }
@@ -152,7 +160,7 @@ export function auditSceneWorkspace(files: SceneFile[]): WorkspaceAuditReport {
       for (const m of scriptSrcMatches) {
         const src = m[1]?.trim();
         if (!src || /^(?:https?:)?\/\//i.test(src) || src.startsWith('data:') || src.startsWith('blob:')) continue;
-        if (!resolveRelativeModulePath(file.path, src, files)) {
+        if (!resolveRelativeModulePath(file.path, src, files, { allowBareRelative: true })) {
           issues.push({
             id: `missing-html-script-${file.path}-${src}`,
             severity: 'error',
@@ -167,7 +175,7 @@ export function auditSceneWorkspace(files: SceneFile[]): WorkspaceAuditReport {
       for (const m of cssHrefMatches) {
         const href = m[1]?.trim();
         if (!href || /^(?:https?:)?\/\//i.test(href) || href.startsWith('data:') || href.startsWith('blob:')) continue;
-        if (!resolveRelativeModulePath(file.path, href, files)) {
+        if (!resolveRelativeModulePath(file.path, href, files, { allowBareRelative: true })) {
           issues.push({
             id: `missing-html-css-${file.path}-${href}`,
             severity: 'error',
@@ -178,6 +186,34 @@ export function auditSceneWorkspace(files: SceneFile[]): WorkspaceAuditReport {
         }
       }
     }
+  }
+
+  // 2b. Circular dependency check across ES/TS modules
+  const graphEdges = new Map<string, Set<string>>();
+  for (const file of files) {
+    if (!/\.(js|mjs|cjs|ts|mts|cts|jsx|tsx)$/i.test(file.path)) continue;
+    for (const match of scanModuleSpecifiers(file.content)) {
+      if (match.isTypeOnly) continue;
+      const target = resolveRelativeModulePath(file.path, match.specifier, files);
+      if (target) {
+        let edges = graphEdges.get(file.path);
+        if (!edges) {
+          edges = new Set<string>();
+          graphEdges.set(file.path, edges);
+        }
+        edges.add(target.path);
+      }
+    }
+  }
+  for (const cycle of detectCircularDependencies(graphEdges)) {
+    const chain = cycle.join(' -> ');
+    issues.push({
+      id: `circular-dep-${chain}`,
+      severity: 'warning',
+      file: cycle[0],
+      message: `Circular module dependency detected: ${chain}.`,
+      suggestion: 'Extract shared state or types into a separate leaf module to prevent initialization-order errors.',
+    });
   }
 
   // 3. Check React component entrypoint exports

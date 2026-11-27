@@ -26,6 +26,28 @@ export default defineConfig(() => {
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
           }
+          const esbuildWasm = path.resolve(__dirname, 'node_modules/esbuild-wasm/esbuild.wasm');
+          if (fs.existsSync(distDir) && fs.existsSync(esbuildWasm)) {
+            fs.copyFileSync(esbuildWasm, path.resolve(distDir, 'esbuild.wasm'));
+          }
+        },
+      },
+      {
+        name: 'serve-esbuild-wasm-dev',
+        apply: 'serve',
+        configureServer(server): void {
+          server.middlewares.use((req, res, next) => {
+            const urlPath = (req.url ?? '').split('?')[0];
+            if (urlPath === '/esbuild.wasm' || urlPath.endsWith('/esbuild.wasm')) {
+              const wasmPath = path.resolve(__dirname, 'node_modules/esbuild-wasm/esbuild.wasm');
+              if (fs.existsSync(wasmPath)) {
+                res.setHeader('Content-Type', 'application/wasm');
+                fs.createReadStream(wasmPath).pipe(res);
+                return;
+              }
+            }
+            next();
+          });
         },
       },
     ],

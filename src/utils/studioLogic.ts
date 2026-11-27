@@ -117,6 +117,20 @@ const EXTENSION_LANGUAGE_MAP: Record<string, DetectedLanguage> = {
   markdown: { id: 'markdown', label: 'Markdown' },
   py: { id: 'python', label: 'Python' },
   txt: { id: 'plaintext', label: 'Plain Text' },
+  glsl: { id: 'plaintext', label: 'GLSL Shader' },
+  vert: { id: 'plaintext', label: 'Vertex Shader' },
+  frag: { id: 'plaintext', label: 'Fragment Shader' },
+  wgsl: { id: 'plaintext', label: 'WGSL Shader' },
+  csv: { id: 'plaintext', label: 'CSV' },
+  yaml: { id: 'plaintext', label: 'YAML' },
+  yml: { id: 'plaintext', label: 'YAML' },
+  toml: { id: 'plaintext', label: 'TOML' },
+  png: { id: 'plaintext', label: 'Image Asset' },
+  jpg: { id: 'plaintext', label: 'Image Asset' },
+  jpeg: { id: 'plaintext', label: 'Image Asset' },
+  webp: { id: 'plaintext', label: 'Image Asset' },
+  gif: { id: 'plaintext', label: 'Image Asset' },
+  ico: { id: 'plaintext', label: 'Image Asset' },
 };
 
 export function detectLanguageFromFilename(filename: string): DetectedLanguage {
