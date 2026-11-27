@@ -25,9 +25,12 @@ const MODULE_EXTENSION_CANDIDATES = [
   '',
   '.tsx',
   '.ts',
+  '.mts',
+  '.cts',
   '.jsx',
   '.js',
   '.mjs',
+  '.cjs',
   '.css',
   '.json',
   '.svg',
@@ -36,6 +39,215 @@ const MODULE_EXTENSION_CANDIDATES = [
   '/index.jsx',
   '/index.js',
 ];
+
+export const SUPPORTED_SCRIPT_EXTENSIONS = [
+  'html',
+  'htm',
+  'css',
+  'js',
+  'mjs',
+  'cjs',
+  'ts',
+  'mts',
+  'cts',
+  'jsx',
+  'tsx',
+  'json',
+  'svg',
+  'xml',
+  'md',
+  'markdown',
+  'txt',
+] as const;
+
+export const FILE_INPUT_ACCEPT = SUPPORTED_SCRIPT_EXTENSIONS.map((ext) => `.${ext}`).join(',');
+
+export const MAX_IMPORTED_FILE_BYTES = 2 * 1024 * 1024;
+
+export interface ImportedFileValidation {
+  valid: boolean;
+  normalizedPath: string;
+  extension: string;
+  error?: string;
+  warning?: string;
+}
+
+export function getFileExtension(filename: string): string {
+  const clean = filename.trim().toLowerCase();
+  const base = clean.split('/').pop() ?? clean;
+  const lastDot = base.lastIndexOf('.');
+  if (lastDot <= 0 || lastDot === base.length - 1) return '';
+  return base.slice(lastDot + 1);
+}
+
+export function isSupportedScriptExtension(filename: string): boolean {
+  const ext = getFileExtension(filename);
+  return (SUPPORTED_SCRIPT_EXTENSIONS as readonly string[]).includes(ext);
+}
+
+export function hasBinaryControlChars(content: string): boolean {
+  if (!content) return false;
+  if (content.includes('\u0000')) return true;
+  if (/^%PDF-|^PK\x03\x04|^\x89PNG|^\xff\xd8\xff|^GIF8[79]a/.test(content)) {
+    return true;
+  }
+  const sample = content.slice(0, 4096);
+  let controlCount = 0;
+  for (let i = 0; i < sample.length; i += 1) {
+    const code = sample.charCodeAt(i);
+    const isAllowedControl = code === 9 || code === 10 || code === 13;
+    if ((code < 32 && !isAllowedControl) || code === 65533) {
+      controlCount += 1;
+    }
+  }
+  return sample.length > 0 && controlCount / sample.length > 0.03;
+}
+
+export function validateImportedFile(
+  filename: string,
+  content: string,
+  sizeBytes?: number
+): ImportedFileValidation {
+  const normalizedPath = normalizeScenePath(filename);
+  if (!normalizedPath) {
+    return {
+      valid: false,
+      normalizedPath: '',
+      extension: '',
+      error: 'Invalid or empty filename.',
+    };
+  }
+
+  const ext = getFileExtension(normalizedPath);
+  if (!isSupportedScriptExtension(normalizedPath)) {
+    return {
+      valid: false,
+      normalizedPath,
+      extension: ext,
+      error: `Unsupported file type "${ext ? `.${ext}` : normalizedPath}". Supported types: HTML, CSS, JS/MJS/CJS, TS/MTS/CTS, JSX, TSX, JSON, SVG, XML, MD, TXT.`,
+    };
+  }
+
+  const byteSize = sizeBytes ?? content.length;
+  if (byteSize > MAX_IMPORTED_FILE_BYTES) {
+    return {
+      valid: false,
+      normalizedPath,
+      extension: ext,
+      error: `File "${normalizedPath}" exceeds the 2 MB studio text-file limit.`,
+    };
+  }
+
+  if (hasBinaryControlChars(content)) {
+    return {
+      valid: false,
+      normalizedPath,
+      extension: ext,
+      error: `File "${normalizedPath}" appears to contain binary or corrupted non-text data.`,
+    };
+  }
+
+  let warning: string | undefined;
+  if (ext === 'json' && content.trim()) {
+    try {
+      JSON.parse(content);
+    } catch {
+      warning = `JSON syntax issue detected in "${normalizedPath}". You can fix it directly in the Script editor.`;
+    }
+  }
+
+  return {
+    valid: true,
+    normalizedPath,
+    extension: ext,
+    warning,
+  };
+}
+
+export function resolveImportConflictName(existingFiles: SceneFile[], rawPath: string): string {
+  const normalized = normalizeScenePath(rawPath) || 'untitled.txt';
+  const existingSet = new Set(existingFiles.map((f) => f.path.toLowerCase()));
+  if (!existingSet.has(normalized.toLowerCase())) {
+    return normalized;
+  }
+
+  const slashIdx = normalized.lastIndexOf('/');
+  const dir = slashIdx >= 0 ? normalized.slice(0, slashIdx + 1) : '';
+  const file = slashIdx >= 0 ? normalized.slice(slashIdx + 1) : normalized;
+  const dotIdx = file.lastIndexOf('.');
+  const stem = dotIdx > 0 ? file.slice(0, dotIdx) : file;
+  const ext = dotIdx > 0 ? file.slice(dotIdx) : '';
+
+  for (let n = 2; n < 1000; n += 1) {
+    const candidate = `${dir}${stem} (${n})${ext}`;
+    if (!existingSet.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+  return `${dir}${stem}-${Date.now().toString(36)}${ext}`;
+}
+
+export function inferFilenameFromCode(rawCode: string, existingFiles: SceneFile[] = []): string {
+  const code = rawCode.trim();
+  let baseName = 'scene.js';
+
+  if (!code) {
+    baseName = 'scene.html';
+  } else if (/^<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]/i.test(code)) {
+    baseName = 'index.html';
+  } else if (/^<svg[\s>]/i.test(code)) {
+    baseName = 'graphic.svg';
+  } else if (/^<\?xml[\s?]/i.test(code)) {
+    baseName = 'data.xml';
+  } else if ((code.startsWith('{') || code.startsWith('[')) && (() => {
+    try {
+      JSON.parse(code);
+      return true;
+    } catch {
+      return false;
+    }
+  })()) {
+    baseName = 'config.json';
+  } else if (
+    /(?:import\s+.*from\s+['"]react['"]|export\s+(?:default\s+)?(?:function|const)\s+[A-Z]|return\s*\(\s*<[A-Za-z])/.test(
+      code
+    )
+  ) {
+    const looksLikeTs =
+      /\b(?:interface|type)\s+[A-Z]|\:\s*(?:React\.FC|string|number|boolean|HTMLElement|CanvasRenderingContext2D)\b|<\s*[A-Z]\w*\s*>\(/.test(
+        code
+      );
+    baseName = looksLikeTs ? 'App.tsx' : 'App.jsx';
+  } else if (
+    /\b(?:interface|type)\s+[A-Z]\w*\s*[={<]|\:\s*(?:string|number|boolean|void|HTMLElement|CanvasRenderingContext2D)\b/.test(
+      code
+    )
+  ) {
+    baseName = 'scene.ts';
+  } else if (
+    /(?:^|\n)\s*(?:@keyframes|:root|\.[a-zA-Z_-][\w-]*|#[a-zA-Z_-][\w-]*|body|html)\s*\{[\s\S]*?(?:background|color|display|transform|animation|width|height)\s*:/.test(
+      code
+    )
+  ) {
+    baseName = 'styles.css';
+  } else if (/^#{1,3}\s+\S+/m.test(code) && !/[;{}]/.test(code)) {
+    baseName = 'notes.md';
+  } else if (/<[a-z][\w-]*[\s>][\s\S]*<\/[a-z][\w-]*>/i.test(code) && !/\b(const|let|var|function|import|export)\b/.test(code)) {
+    baseName = 'index.html';
+  } else if (/\b(?:import|export|const|let|function|requestAnimationFrame|document\.|window\.)\b/.test(code)) {
+    baseName = 'main.js';
+  } else {
+    baseName = 'untitled.txt';
+  }
+
+  return resolveImportConflictName(existingFiles, baseName);
+}
+
+export function computeFilesSignature(files: SceneFile[]): string {
+  return files
+    .map((f) => `${f.path}::${f.content.length}::${f.content}`)
+    .join('\n\u0000\n');
+}
 
 export function normalizeScenePath(rawPath: string): string {
   const unified = rawPath.trim().replace(/\\/g, '/').replace(/^(\.\/)+/, '').replace(/^\/+/, '');
@@ -183,8 +395,11 @@ export function detectSceneEntryFile(files: SceneFile[]): SceneFile | null {
   const htmlFile = files.find((f) => /\.(html|htm)$/i.test(f.path));
   if (htmlFile) return htmlFile;
 
-  const runnableFile = files.find((f) => /\.(tsx|jsx|ts|js|mjs)$/i.test(f.path));
+  const runnableFile = files.find((f) => /\.(tsx|jsx|ts|mts|cts|js|mjs|cjs)$/i.test(f.path));
   if (runnableFile) return runnableFile;
+
+  const svgFile = files.find((f) => /\.svg$/i.test(f.path));
+  if (svgFile) return svgFile;
 
   return files[0];
 }
@@ -273,7 +488,7 @@ export function extractSceneExternalDependencies(files: SceneFile[]): string[] {
     if (/\.(jsx|tsx)$/i.test(file.path)) {
       usesJsx = true;
     }
-    if (/\.(js|mjs|ts|jsx|tsx|html|htm)$/i.test(file.path)) {
+    if (/\.(js|mjs|cjs|ts|mts|cts|jsx|tsx|html|htm)$/i.test(file.path)) {
       for (const spec of extractBareSpecifiersFromCode(file.content)) {
         specifiers.add(spec);
       }

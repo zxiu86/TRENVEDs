@@ -40,9 +40,21 @@ const STATUS_DISPLAY: Record<AiStatus, { label: string; toneClass: string }> = {
     label: 'Planning',
     toneClass: 'text-amber-300 border-amber-500/30 bg-amber-500/10',
   },
+  diagnosing: {
+    label: 'Diagnosing',
+    toneClass: 'text-amber-300 border-amber-500/30 bg-amber-500/10',
+  },
+  researching: {
+    label: 'Researching',
+    toneClass: 'text-sky-300 border-sky-500/35 bg-sky-500/10',
+  },
   thinking: {
     label: 'Thinking',
     toneClass: 'text-amber-300 border-amber-500/30 bg-amber-500/10',
+  },
+  reviewing: {
+    label: 'Reviewing',
+    toneClass: 'text-amber-200 border-amber-500/35 bg-amber-500/10',
   },
   generating: {
     label: 'Writing',

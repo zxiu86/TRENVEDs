@@ -532,7 +532,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       Script line numbers
                     </span>
                     <span className="block text-xs text-zinc-400">
-                      Show line numbers in the read-only AI Script viewer.
+                      Show line numbers in the AI Script code editor.
                     </span>
                   </div>
                   <input

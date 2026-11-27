@@ -13,18 +13,23 @@ import {
   applyFileOperations,
   detectSceneEntryFile,
   extractSceneExternalDependencies,
+  inferFilenameFromCode,
   normalizeScenePath,
+  resolveImportConflictName,
   resolveRelativeModulePath,
+  validateImportedFile,
 } from './sceneFiles';
+import { auditSceneWorkspace, detectDiagnosticIntent, shouldUseWebResearch } from './sceneDiagnostics';
 import { compileSceneBundle, resolveExternalPackageUrl } from '../runtime/sceneBundler';
 import {
   classifyProviderError,
   discoverProviderModels,
+  generateProviderCompletionDetailed,
   maskApiKey,
   resolveProviderBaseUrl,
   validateProviderBaseUrl,
 } from '../services/aiProviders';
-import { parseAiBrainResponse } from '../services/aiBrain';
+import { buildWorkspaceContextPrompt, parseAiBrainResponse } from '../services/aiBrain';
 import type { SceneFile, StudioSettings } from '../types/studio';
 
 const defaultSettings: StudioSettings = {
@@ -34,7 +39,7 @@ const defaultSettings: StudioSettings = {
   showLineNumbers: true,
 };
 
-test('createLocalProject initializes V1.2 project with empty files and activityRuns', () => {
+test('createLocalProject initializes project with empty files and activityRuns', () => {
   const project = createLocalProject(defaultSettings, 0, '2026-11-26T10:00:00.000Z');
   assert.equal(project.name, 'Untitled Sequence 01');
   assert.equal(project.aspectRatio, '16:9');
@@ -102,6 +107,7 @@ test('detectLanguageFromFilename maps extensions dynamically', () => {
   assert.deepEqual(detectLanguageFromFilename('TitleOverlay.tsx'), { id: 'tsx', label: 'TSX' });
   assert.deepEqual(detectLanguageFromFilename('lighting.preset.json'), { id: 'json', label: 'JSON' });
   assert.deepEqual(detectLanguageFromFilename('aperture.svg'), { id: 'svg', label: 'SVG / XML' });
+  assert.deepEqual(detectLanguageFromFilename('notes.txt'), { id: 'plaintext', label: 'Plain Text' });
 });
 
 test('normalizeScenePath and applyFileOperations handle create, update, rename, delete cleanly', () => {
@@ -143,7 +149,54 @@ test('detectSceneEntryFile and resolveRelativeModulePath resolve multi-file grap
   assert.ok(deps.includes('react-dom/client'));
 });
 
-test('compileSceneBundle compiles React TSX multi-file project with importmap and diagnostics bridge', () => {
+test('validateImportedFile inspects both extension and content, rejecting binaries and oversized files', () => {
+  assert.equal(validateImportedFile('scene.tsx', 'export default function App() { return <div />; }').valid, true);
+  assert.equal(validateImportedFile('notes.txt', 'hello world').valid, true);
+
+  const unsupported = validateImportedFile('movie.mp4', 'data');
+  assert.equal(unsupported.valid, false);
+  assert.match(unsupported.error ?? '', /Unsupported file type/);
+
+  const binaryDisguised = validateImportedFile('fake.js', '%PDF-1.4\u0000binary');
+  assert.equal(binaryDisguised.valid, false);
+  assert.match(binaryDisguised.error ?? '', /binary/);
+
+  const brokenJson = validateImportedFile('preset.json', '{ invalid');
+  assert.equal(brokenJson.valid, true);
+  assert.match(brokenJson.warning ?? '', /JSON syntax issue/);
+});
+
+test('resolveImportConflictName and inferFilenameFromCode handle collisions and pasted code languages cleanly', () => {
+  const existing: SceneFile[] = [
+    { path: 'index.html', content: '<h1>1</h1>', updatedAt: '' },
+    { path: 'src/App.tsx', content: 'export default function App() { return <div />; }', updatedAt: '' },
+  ];
+  assert.equal(resolveImportConflictName(existing, 'index.html'), 'index (2).html');
+  assert.equal(resolveImportConflictName(existing, 'src/App.tsx'), 'src/App (2).tsx');
+
+  assert.equal(
+    inferFilenameFromCode('<!doctype html><html><body>Hi</body></html>', existing),
+    'index (2).html'
+  );
+  assert.equal(
+    inferFilenameFromCode('import React from "react"; export default function Scene() { return <div />; }', []),
+    'App.jsx'
+  );
+  assert.equal(
+    inferFilenameFromCode('interface Props { label: string }\nexport default function Scene({ label }: Props) { return <div>{label}</div>; }', []),
+    'App.tsx'
+  );
+  assert.equal(
+    inferFilenameFromCode('body { background: #000; color: #fff; display: flex; }', []),
+    'styles.css'
+  );
+  assert.equal(
+    inferFilenameFromCode('<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="20" /></svg>', []),
+    'graphic.svg'
+  );
+});
+
+test('compileSceneBundle compiles React TSX multi-file project and inline HTML babel/tsx scripts', () => {
   const files: SceneFile[] = [
     {
       path: 'src/Card.tsx',
@@ -172,9 +225,20 @@ test('compileSceneBundle compiles React TSX multi-file project with importmap an
   assert.doesNotMatch(bundle.html, /%22\.%2Fcard\.css%22/);
   assert.match(bundle.html, /https:\/\/esm\.sh\/gsap/);
   assert.match(bundle.html, /trenveds-runtime/);
+
+  const singleHtmlBundle = compileSceneBundle([
+    {
+      path: 'index.html',
+      content:
+        '<!doctype html><html><body><div id="app"></div><script type="text/tsx">const title: string = "V1.3"; document.getElementById("app")!.textContent = title;</script></body></html>',
+      updatedAt: '',
+    },
+  ]);
+  assert.equal(singleHtmlBundle.diagnostics.length, 0);
+  assert.match(singleHtmlBundle.html, /<script type="module" src="data:text\/javascript/);
 });
 
-test('compileSceneBundle reports unresolved relative imports cleanly', () => {
+test('compileSceneBundle reports unresolved relative imports and missing HTML stylesheets cleanly', () => {
   const files: SceneFile[] = [
     {
       path: 'main.ts',
@@ -186,6 +250,49 @@ test('compileSceneBundle reports unresolved relative imports cleanly', () => {
   assert.equal(bundle.diagnostics.length, 1);
   assert.equal(bundle.diagnostics[0].type, 'compile-error');
   assert.match(bundle.diagnostics[0].message, /does-not-exist/);
+
+  const htmlMissingCss = compileSceneBundle([
+    {
+      path: 'index.html',
+      content: '<html><head><link rel="stylesheet" href="./missing.css" /></head><body>Hi</body></html>',
+      updatedAt: '',
+    },
+  ]);
+  assert.equal(htmlMissingCss.diagnostics.length, 1);
+  assert.match(htmlMissingCss.diagnostics[0].message, /missing\.css/);
+});
+
+test('auditSceneWorkspace autonomously finds hidden bugs and routes diagnostic/research intent', () => {
+  const brokenFiles: SceneFile[] = [
+    {
+      path: 'index.html',
+      content: '<html><body><h1>Old static page</h1></body></html>',
+      updatedAt: '',
+    },
+    {
+      path: 'src/App.tsx',
+      content: 'import { Ring } from "./Ring"; export function Helper() { return <Ring />; }',
+      updatedAt: '',
+    },
+    {
+      path: 'widget.js',
+      content: 'export function Widget() { return <div className="box">JSX in .js</div>; }',
+      updatedAt: '',
+    },
+  ];
+
+  const audit = auditSceneWorkspace(brokenFiles);
+  assert.ok(audit.issues.some((i) => i.id === 'stale-html-shadowing'));
+  assert.ok(audit.issues.some((i) => i.id.startsWith('missing-import-src/App.tsx')));
+  assert.ok(audit.issues.some((i) => i.id.startsWith('jsx-in-js-widget.js')));
+
+  assert.equal(detectDiagnosticIntent('Create a crimson title', [], auditSceneWorkspace([])), false);
+  assert.equal(detectDiagnosticIntent('Why is my scene broken?', [], auditSceneWorkspace([])), true);
+  assert.equal(detectDiagnosticIntent('Update text', brokenFiles, audit), true);
+  assert.equal(
+    shouldUseWebResearch('Fix Three.js WebGL shader compatibility issue', brokenFiles, audit),
+    true
+  );
 });
 
 test('resolveExternalPackageUrl rejects unsafe or malformed specifiers and pins react', () => {
@@ -194,7 +301,7 @@ test('resolveExternalPackageUrl rejects unsafe or malformed specifiers and pins 
   assert.equal(resolveExternalPackageUrl('javascript:alert(1)').url, null);
 });
 
-test('aiProviders helpers mask keys, resolve official endpoints, validate custom URLs, and classify errors', () => {
+test('aiProviders helpers mask keys, resolve official endpoints, validate custom URLs, and extract Gemini web sources', async () => {
   assert.equal(maskApiKey('AIzaSyA1234567890XYZW'), 'AIza••••••XYZW');
   assert.equal(maskApiKey('short'), '••••••••');
 
@@ -227,10 +334,56 @@ test('aiProviders helpers mask keys, resolve official endpoints, validate custom
     classifyProviderError(400, '{"error":{"message":"Model gpt-99 does not exist"}}', 'openai'),
     /Unsupported or unavailable model/
   );
+
+  let capturedBody: Record<string, unknown> = {};
+  const mockGeminiSearchFetch: typeof fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    return new Response(
+      JSON.stringify({
+        candidates: [
+          {
+            content: { parts: [{ text: 'Three.js 0.170 works cleanly with OrbitControls.' }] },
+            groundingMetadata: {
+              webSearchQueries: ['three 0.170 esm.sh OrbitControls'],
+              groundingChunks: [
+                { web: { uri: 'https://threejs.org/docs/', title: 'Three.js Docs' } },
+              ],
+            },
+          },
+        ],
+      }),
+      { status: 200 }
+    );
+  };
+
+  const searchResult = await generateProviderCompletionDetailed(
+    {
+      id: 'p1',
+      name: 'Gemini',
+      kind: 'gemini',
+      baseUrl: '',
+      model: 'gemini-2.5-flash',
+      apiKey: 'AIzaTestKey12345',
+      persistence: 'session',
+      discoveredModels: [],
+      lastTestStatus: 'untested',
+    },
+    {
+      systemPrompt: 'Verify library APIs',
+      messages: [{ role: 'user', content: 'Check Three.js OrbitControls' }],
+      expectJson: true,
+      enableWebSearch: true,
+    },
+    mockGeminiSearchFetch
+  );
+
+  assert.deepEqual(capturedBody.tools, [{ google_search: {} }]);
+  assert.equal((capturedBody.generationConfig as Record<string, unknown>).responseMimeType, undefined);
+  assert.equal(searchResult.webSources.length, 1);
+  assert.equal(searchResult.webSources[0].url, 'https://threejs.org/docs/');
 });
 
 test('discoverProviderModels retrieves full untruncated paginated lists across Gemini, OpenAI, and Anthropic', async () => {
-  // Gemini with 2 pages and method filtering
   const geminiUrls: string[] = [];
   const geminiFetch: typeof fetch = async (input) => {
     const url = String(input);
@@ -265,7 +418,6 @@ test('discoverProviderModels retrieves full untruncated paginated lists across G
   assert.ok(geminiUrls[0].startsWith('https://generativelanguage.googleapis.com/v1beta/models'));
   assert.deepEqual(geminiResult.models, ['gemini-2.5-flash', 'gemini-2.5-pro']);
 
-  // OpenAI returns >60 models with zero truncation
   const openAiItems = Array.from({ length: 85 }, (_, idx) => ({
     id: `model-${String(idx + 1).padStart(3, '0')}`,
   }));
@@ -277,7 +429,6 @@ test('discoverProviderModels retrieves full untruncated paginated lists across G
   );
   assert.equal(openAiResult.models.length, 85);
 
-  // Anthropic official /v1/models with pagination & invalid-key classification
   const anthropicFetch: typeof fetch = async (input) => {
     const url = String(input);
     if (!url.includes('after_id=')) {
@@ -307,7 +458,6 @@ test('discoverProviderModels retrieves full untruncated paginated lists across G
     'claude-3-5-haiku-20241022',
   ]);
 
-  // Abort cleanly marks aborted: true without returning stale error
   const abortController = new AbortController();
   abortController.abort();
   const abortedResult = await discoverProviderModels(
@@ -319,11 +469,31 @@ test('discoverProviderModels retrieves full untruncated paginated lists across G
   assert.deepEqual(abortedResult.models, []);
 });
 
-test('parseAiBrainResponse extracts fenced JSON and normalizes operations', () => {
-  const raw = '```json\n{"plan":"Create crimson reveal","technologies":["HTML","CSS"],"dependencies":[],"operations":[{"type":"create","path":"./index.html","content":"<h1>Hi</h1>"}],"assistantSummary":"Created reveal."}\n```';
+test('parseAiBrainResponse and buildWorkspaceContextPrompt preserve deep diagnosis, candidate critiques, and repair history', () => {
+  const raw = '```json\n{"diagnosis":"Stale index.html shadows App.tsx","candidateSolutions":[{"approach":"Patch HTML","critique":"Leaves legacy DOM conflicts","selected":false},{"approach":"Delete stale index.html","critique":"Cleanly runs React TSX entry","selected":true}],"selfReviewNote":"Verified React 19 export default","selectionRationale":"Safest root fix","plan":"Remove stale index.html","technologies":["React","TSX"],"dependencies":["react"],"operations":[{"type":"delete","path":"./index.html"}],"assistantSummary":"Removed stale index.html."}\n```';
   const parsed = parseAiBrainResponse(raw);
-  assert.equal(parsed.plan, 'Create crimson reveal');
-  assert.deepEqual(parsed.technologies, ['HTML', 'CSS']);
-  assert.equal(parsed.operations.length, 1);
-  assert.equal(parsed.operations[0].path, 'index.html');
+  assert.equal(parsed.diagnosis, 'Stale index.html shadows App.tsx');
+  assert.equal(parsed.candidateSolutions?.length, 2);
+  assert.equal(parsed.candidateSolutions?.[1].selected, true);
+  assert.equal(parsed.selfReviewNote, 'Verified React 19 export default');
+  assert.equal(parsed.operations[0].type, 'delete');
+
+  const repairContext = buildWorkspaceContextPrompt({
+    userPrompt: 'Fix the broken scene',
+    projectName: 'Demo',
+    aspectRatio: '16:9',
+    frameRate: 24,
+    files: [{ path: 'App.tsx', content: 'export default function App() { return <div />; }', updatedAt: '' }],
+    repairAttempt: 2,
+    repairHistory: [
+      {
+        attempt: 1,
+        errorSummary: 'Unresolved import ./Ring',
+        planTried: 'Renamed Ring.js to Ring.jsx',
+        filesTouched: ['Ring.jsx'],
+      },
+    ],
+  });
+  assert.match(repairContext, /PREVIOUS FAILED REPAIR ATTEMPTS \(DO NOT REPEAT THESE APPROACHES\)/);
+  assert.match(repairContext, /Renamed Ring\.js to Ring\.jsx/);
 });

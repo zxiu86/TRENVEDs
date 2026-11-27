@@ -1,5 +1,6 @@
 import type {
   AiProviderConfig,
+  AiWebSource,
   ConnectionTestStatus,
   CredentialPersistence,
   ProviderKind,
@@ -84,7 +85,14 @@ export interface ProviderCompletionRequest {
   temperature?: number;
   maxTokens?: number;
   expectJson?: boolean;
+  enableWebSearch?: boolean;
   signal?: AbortSignal;
+}
+
+export interface ProviderCompletionResult {
+  text: string;
+  webSources: AiWebSource[];
+  searchQueries: string[];
 }
 
 export function resolveProviderBaseUrl(
@@ -458,11 +466,11 @@ export async function discoverProviderModels(
   }
 }
 
-export async function generateProviderCompletion(
+export async function generateProviderCompletionDetailed(
   provider: AiProviderConfig,
   request: ProviderCompletionRequest,
   fetcher: typeof fetch = fetch
-): Promise<string> {
+): Promise<ProviderCompletionResult> {
   const urlCheck = validateProviderBaseUrl(resolveProviderBaseUrl(provider));
   if (!urlCheck.valid) {
     throw new Error(urlCheck.error ?? 'Invalid provider base URL.');
@@ -482,6 +490,16 @@ export async function generateProviderCompletion(
 
   if (provider.kind === 'gemini') {
     const endpoint = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
+    const useGoogleSearch = Boolean(request.enableWebSearch);
+    const generationConfig: Record<string, unknown> = {
+      temperature,
+      maxOutputTokens: maxTokens,
+    };
+    // Gemini v1beta does not allow combining google_search grounding with JSON responseMimeType
+    if (request.expectJson && !useGoogleSearch) {
+      generationConfig.responseMimeType = 'application/json';
+    }
+
     const body: Record<string, unknown> = {
       systemInstruction: {
         parts: [{ text: request.systemPrompt }],
@@ -490,11 +508,8 @@ export async function generateProviderCompletion(
         role: msg.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: msg.content }],
       })),
-      generationConfig: {
-        temperature,
-        maxOutputTokens: maxTokens,
-        ...(request.expectJson ? { responseMimeType: 'application/json' } : {}),
-      },
+      generationConfig,
+      ...(useGoogleSearch ? { tools: [{ google_search: {} }] } : {}),
     };
 
     const response = await fetcher(endpoint, {
@@ -516,9 +531,16 @@ export async function generateProviderCompletion(
       candidates?: Array<{
         content?: { parts?: Array<{ text?: string }> };
         finishReason?: string;
+        groundingMetadata?: {
+          webSearchQueries?: string[];
+          groundingChunks?: Array<{
+            web?: { uri?: string; title?: string };
+          }>;
+        };
       }>;
     };
-    const text = parsed.candidates?.[0]?.content?.parts
+    const candidate = parsed.candidates?.[0];
+    const text = candidate?.content?.parts
       ?.map((p) => p.text ?? '')
       .join('')
       .trim();
@@ -526,7 +548,23 @@ export async function generateProviderCompletion(
     if (!text) {
       throw new Error('Provider returned an empty completion.');
     }
-    return text;
+
+    const seenUrls = new Set<string>();
+    const webSources: AiWebSource[] = [];
+    for (const chunk of candidate?.groundingMetadata?.groundingChunks ?? []) {
+      const uri = chunk.web?.uri?.trim();
+      if (!uri || !/^https?:\/\//i.test(uri) || seenUrls.has(uri)) continue;
+      seenUrls.add(uri);
+      webSources.push({
+        title: chunk.web?.title?.trim() || uri,
+        url: uri,
+      });
+    }
+
+    const searchQueries = (candidate?.groundingMetadata?.webSearchQueries ?? [])
+      .filter((q): q is string => typeof q === 'string' && Boolean(q.trim()));
+
+    return { text, webSources, searchQueries };
   }
 
   if (provider.kind === 'anthropic') {
@@ -571,7 +609,7 @@ export async function generateProviderCompletion(
     if (!text) {
       throw new Error('Anthropic returned an empty completion.');
     }
-    return text;
+    return { text, webSources: [], searchQueries: [] };
   }
 
   // OpenAI / OpenAI-Compatible
@@ -611,7 +649,16 @@ export async function generateProviderCompletion(
   if (!text) {
     throw new Error('Provider returned an empty completion.');
   }
-  return text;
+  return { text, webSources: [], searchQueries: [] };
+}
+
+export async function generateProviderCompletion(
+  provider: AiProviderConfig,
+  request: ProviderCompletionRequest,
+  fetcher: typeof fetch = fetch
+): Promise<string> {
+  const result = await generateProviderCompletionDetailed(provider, request, fetcher);
+  return result.text;
 }
 
 export async function testProviderConnection(

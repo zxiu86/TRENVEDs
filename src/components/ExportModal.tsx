@@ -66,7 +66,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
         <div className="mt-4 space-y-4">
           <p className="text-sm leading-relaxed text-zinc-300">
-            Video encoding, frame capture, and rendered export remain planned for a future release. Your live scene in TRENVEDs V1.2 runs interactively in the Scene Viewport and can be inspected via AI Script.
+            Video encoding, frame capture, and rendered export remain planned for a future release. Your live scene in TRENVEDs V1.3 runs interactively in the Scene Viewport and can be edited directly via AI Script.
           </p>
 
           <div className="rounded-lg border border-white/10 bg-black/30 p-3.5 space-y-2 text-xs">

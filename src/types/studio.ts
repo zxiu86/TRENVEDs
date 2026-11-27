@@ -5,7 +5,10 @@ export type FrameRate = 24 | 30 | 60;
 export type AiStatus =
   | 'idle'
   | 'planning'
+  | 'diagnosing'
+  | 'researching'
   | 'thinking'
+  | 'reviewing'
   | 'generating'
   | 'compiling'
   | 'repairing';
@@ -85,7 +88,10 @@ export type ActivityStepStatus = 'pending' | 'running' | 'done' | 'error' | 'ski
 export type ActivityPhase =
   | 'analyze'
   | 'inspect'
+  | 'diagnose'
+  | 'research'
   | 'plan'
+  | 'self-review'
   | 'dependencies'
   | 'files'
   | 'compile'
@@ -102,6 +108,17 @@ export interface ActivityStep {
   timestamp: string;
 }
 
+export interface AiCandidateOption {
+  approach: string;
+  critique: string;
+  selected?: boolean;
+}
+
+export interface AiWebSource {
+  title: string;
+  url: string;
+}
+
 export interface ActivityRun {
   id: string;
   messageId?: string;
@@ -115,6 +132,11 @@ export interface ActivityRun {
   deletedFiles: string[];
   dependencies: DependencyStatus[];
   repairAttempts: number;
+  diagnosis?: string;
+  alternativesConsidered?: AiCandidateOption[];
+  selfReviewNote?: string;
+  selectionRationale?: string;
+  webSources?: AiWebSource[];
   finalSummary?: string;
   errorDetail?: string;
   steps: ActivityStep[];

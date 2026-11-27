@@ -116,6 +116,7 @@ const EXTENSION_LANGUAGE_MAP: Record<string, DetectedLanguage> = {
   md: { id: 'markdown', label: 'Markdown' },
   markdown: { id: 'markdown', label: 'Markdown' },
   py: { id: 'python', label: 'Python' },
+  txt: { id: 'plaintext', label: 'Plain Text' },
 };
 
 export function detectLanguageFromFilename(filename: string): DetectedLanguage {

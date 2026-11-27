@@ -5,9 +5,13 @@ import {
   ChevronDown,
   ChevronRight,
   CircleDashed,
+  ExternalLink,
   FileCode2,
+  Globe,
   Loader2,
+  Microscope,
   Package,
+  ShieldCheck,
   Wrench,
 } from 'lucide-react';
 import type { ActivityRun, ActivityStep } from '../types/studio';
@@ -123,6 +127,93 @@ export const ActivityReportCard: React.FC<ActivityReportCardProps> = ({
               </li>
             ))}
           </ul>
+
+          {run.diagnosis && (
+            <div
+              data-testid="activity-diagnosis"
+              className="border-t border-white/[0.06] pt-2 space-y-1"
+            >
+              <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+                <Microscope className="h-3 w-3 text-red-400" />
+                <span>Diagnosis</span>
+              </div>
+              <p className="text-[11px] leading-relaxed text-zinc-300 break-words">
+                {run.diagnosis}
+              </p>
+            </div>
+          )}
+
+          {((run.alternativesConsidered && run.alternativesConsidered.length > 0) ||
+            run.selfReviewNote ||
+            run.selectionRationale) && (
+            <div
+              data-testid="activity-self-review"
+              className="border-t border-white/[0.06] pt-2 space-y-1.5"
+            >
+              <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+                <ShieldCheck className="h-3 w-3 text-emerald-400" />
+                <span>Options &amp; Self-Review</span>
+              </div>
+              {run.alternativesConsidered && run.alternativesConsidered.length > 0 && (
+                <ul className="space-y-1">
+                  {run.alternativesConsidered.map((opt, idx) => (
+                    <li
+                      key={`${opt.approach}-${idx}`}
+                      className={`rounded-md border px-2 py-1.5 text-[10px] leading-relaxed ${
+                        opt.selected
+                          ? 'border-emerald-500/35 bg-emerald-500/10 text-zinc-100'
+                          : 'border-white/[0.06] bg-black/25 text-zinc-400'
+                      }`}
+                    >
+                      <span className="font-medium text-zinc-200">
+                        {opt.selected ? 'Selected: ' : 'Evaluated: '}
+                        {opt.approach}
+                      </span>
+                      <p className="mt-0.5 text-[10px] text-zinc-400 break-words">
+                        {opt.critique}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {run.selectionRationale && (
+                <p className="text-[10px] leading-relaxed text-zinc-300 break-words">
+                  {run.selectionRationale}
+                </p>
+              )}
+              {run.selfReviewNote && (
+                <p className="text-[10px] leading-relaxed text-zinc-400 break-words">
+                  Verification: {run.selfReviewNote}
+                </p>
+              )}
+            </div>
+          )}
+
+          {run.webSources && run.webSources.length > 0 && (
+            <div
+              data-testid="activity-web-sources"
+              className="border-t border-white/[0.06] pt-2 space-y-1"
+            >
+              <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+                <Globe className="h-3 w-3 text-sky-400" />
+                <span>Verified Web Sources</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {run.webSources.map((src) => (
+                  <a
+                    key={src.url}
+                    href={src.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex max-w-full items-center gap-1 rounded border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-200 hover:bg-sky-500/20"
+                  >
+                    <span className="truncate max-w-[200px]">{src.title}</span>
+                    <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
 
           {(run.createdFiles.length > 0 ||
             run.modifiedFiles.length > 0 ||

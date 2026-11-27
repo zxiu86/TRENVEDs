@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clapperboard, Code2, MessageSquare } from 'lucide-react';
 import {
   compileSceneBundle,
+  prepareSceneDependencies,
   type CompiledSceneBundle,
 } from '../runtime/sceneBundler';
 import { executeAiSceneTurn } from '../services/aiBrain';
@@ -18,6 +19,13 @@ import type {
   SceneFile,
   StudioSettings,
 } from '../types/studio';
+import {
+  computeFilesSignature,
+  deleteSceneFile,
+  detectSceneEntryFile,
+  renameSceneFile,
+  upsertSceneFile,
+} from '../utils/sceneFiles';
 import { clampPanelWidth, clampZoom } from '../utils/studioLogic';
 import { AiChatPanel } from './AiChatPanel';
 import { ExportModal } from './ExportModal';
@@ -64,6 +72,8 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('empty');
   const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostic[]>([]);
   const [reloadNonce, setReloadNonce] = useState(0);
+  const [lastExecutedSignature, setLastExecutedSignature] = useState<string | null>(null);
+  const [isManualRunning, setIsManualRunning] = useState(false);
 
   // Desktop/Tablet panel open & resizable widths
   const [isChatOpen, setIsChatOpen] = useState(true);
@@ -78,6 +88,20 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
   projectRef.current = project;
   const abortControllerRef = useRef<AbortController | null>(null);
   const pendingVerificationRef = useRef<PendingRuntimeVerification | null>(null);
+  const initializedProjectIdRef = useRef<string | null>(null);
+
+  const currentFilesSignature = useMemo(
+    () => computeFilesSignature(project.files),
+    [project.files]
+  );
+
+  const entryFilePath = useMemo(
+    () => detectSceneEntryFile(project.files)?.path ?? null,
+    [project.files]
+  );
+
+  const hasPendingRunChanges =
+    project.files.length > 0 && lastExecutedSignature !== currentFilesSignature;
 
   const clearPendingVerification = useCallback(() => {
     const pending = pendingVerificationRef.current;
@@ -98,27 +122,38 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
     };
   }, [project.id, clearPendingVerification]);
 
-  // Compile initial project files if reopening a populated project
+  // Compile saved scene files ONLY when opening an already-populated project (never auto-run manual edits/imports)
   useEffect(() => {
+    if (initializedProjectIdRef.current === project.id) {
+      if (project.files.length === 0) {
+        setCompiledBundle(null);
+        setRuntimeStatus('empty');
+        setRuntimeDiagnostics([]);
+        setLastExecutedSignature(null);
+      }
+      return;
+    }
+
+    initializedProjectIdRef.current = project.id;
+
     if (project.files.length === 0) {
       setCompiledBundle(null);
       setRuntimeStatus('empty');
       setRuntimeDiagnostics([]);
+      setLastExecutedSignature(null);
       return;
     }
 
-    if (!compiledBundle) {
-      const bundle = compileSceneBundle(project.files, {
-        aspectRatio: project.aspectRatio,
-        frameRate: project.frameRate,
-      });
-      setCompiledBundle(bundle);
-      setRuntimeDiagnostics(bundle.diagnostics);
-      setRuntimeStatus(bundle.diagnostics.length > 0 ? 'error' : 'compiling');
-    }
-    // Only re-evaluate when project.id changes or files become empty
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.id, project.files.length]);
+    const savedSig = computeFilesSignature(project.files);
+    const bundle = compileSceneBundle(project.files, {
+      aspectRatio: project.aspectRatio,
+      frameRate: project.frameRate,
+    });
+    setCompiledBundle(bundle);
+    setRuntimeDiagnostics(bundle.diagnostics);
+    setRuntimeStatus(bundle.diagnostics.length > 0 ? 'error' : 'compiling');
+    setLastExecutedSignature(savedSig);
+  }, [project.id, project.files, project.aspectRatio, project.frameRate]);
 
   const handleRenameProject = (nextName: string) => {
     onUpdateProject({
@@ -147,6 +182,74 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
       setIsCodeOpen(true);
     }
   };
+
+  const handleUpdateFileContent = useCallback(
+    (path: string, content: string) => {
+      const latest = projectRef.current;
+      const nextFiles = upsertSceneFile(latest.files, path, content);
+      onUpdateProject({
+        ...latest,
+        files: nextFiles,
+        updatedAt: new Date().toISOString(),
+      });
+    },
+    [onUpdateProject]
+  );
+
+  const handleUpsertFiles = useCallback(
+    (
+      incoming: Array<{ path: string; content: string; description?: string }>,
+      nextActivePath?: string | null
+    ) => {
+      const latest = projectRef.current;
+      let nextFiles = [...latest.files];
+      const now = new Date().toISOString();
+      for (const item of incoming) {
+        nextFiles = upsertSceneFile(nextFiles, item.path, item.content, item.description, now);
+      }
+      onUpdateProject({
+        ...latest,
+        files: nextFiles,
+        activeFilePath: nextActivePath ?? latest.activeFilePath ?? nextFiles[0]?.path ?? null,
+        updatedAt: now,
+      });
+    },
+    [onUpdateProject]
+  );
+
+  const handleRenameFile = useCallback(
+    (oldPath: string, newPath: string) => {
+      const latest = projectRef.current;
+      const now = new Date().toISOString();
+      const nextFiles = renameSceneFile(latest.files, oldPath, newPath, now);
+      onUpdateProject({
+        ...latest,
+        files: nextFiles,
+        activeFilePath:
+          latest.activeFilePath === oldPath ? newPath : latest.activeFilePath,
+        updatedAt: now,
+      });
+    },
+    [onUpdateProject]
+  );
+
+  const handleDeleteFile = useCallback(
+    (path: string) => {
+      const latest = projectRef.current;
+      const nextFiles = deleteSceneFile(latest.files, path);
+      const nextActive =
+        latest.activeFilePath === path
+          ? nextFiles[0]?.path ?? null
+          : latest.activeFilePath;
+      onUpdateProject({
+        ...latest,
+        files: nextFiles,
+        activeFilePath: nextActive,
+        updatedAt: new Date().toISOString(),
+      });
+    },
+    [onUpdateProject]
+  );
 
   const handleZoomIn = () => {
     setIsFitMode(false);
@@ -233,17 +336,40 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
     [clearPendingVerification]
   );
 
-  const handleReloadScene = () => {
-    if (projectRef.current.files.length === 0) return;
-    const bundle = compileSceneBundle(projectRef.current.files, {
-      aspectRatio: projectRef.current.aspectRatio,
-      frameRate: projectRef.current.frameRate,
-    });
-    setRuntimeDiagnostics(bundle.diagnostics);
-    setRuntimeStatus(bundle.diagnostics.length > 0 ? 'error' : 'compiling');
-    setCompiledBundle(bundle);
-    setReloadNonce((n) => n + 1);
-  };
+  const handleReloadScene = useCallback(async () => {
+    const current = projectRef.current;
+    if (current.files.length === 0) return;
+    setIsManualRunning(true);
+    setRuntimeDiagnostics([]);
+    setRuntimeStatus('preparing');
+
+    try {
+      const deps = await prepareSceneDependencies(current.files);
+      const depErrors: RuntimeDiagnostic[] = deps
+        .filter((d) => d.status === 'failed')
+        .map((d) => ({
+          id: `dep_${d.name}`,
+          type: 'dependency-error',
+          message: d.error ?? `Failed to load package ${d.name}`,
+          timestamp: new Date().toISOString(),
+        }));
+
+      const bundle = compileSceneBundle(projectRef.current.files, {
+        aspectRatio: projectRef.current.aspectRatio,
+        frameRate: projectRef.current.frameRate,
+        preparedDependencies: deps,
+      });
+
+      const allErrors = [...depErrors, ...bundle.diagnostics];
+      setRuntimeDiagnostics(allErrors);
+      setRuntimeStatus(allErrors.length > 0 ? 'error' : 'compiling');
+      setCompiledBundle(bundle);
+      setLastExecutedSignature(computeFilesSignature(projectRef.current.files));
+      setReloadNonce((n) => n + 1);
+    } finally {
+      setIsManualRunning(false);
+    }
+  }, []);
 
   const handleSendMessage = async (rawContent: string) => {
     if (!activeProvider || !activeProvider.apiKey.trim()) {
@@ -305,6 +431,7 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
 
     if (result.compiledBundle) {
       setCompiledBundle(result.compiledBundle);
+      setLastExecutedSignature(computeFilesSignature(result.finalFiles));
       if (result.isError) {
         setRuntimeStatus('error');
       }
@@ -550,7 +677,15 @@ export const StudioWorkspace: React.FC<StudioWorkspaceProps> = ({
           <ScriptCodePanel
             files={project.files}
             activeFilePath={project.activeFilePath}
+            entryFilePath={entryFilePath}
+            hasPendingRunChanges={hasPendingRunChanges}
+            isRunningScene={isManualRunning || aiStatus !== 'idle'}
             onSelectFile={handleSelectFile}
+            onUpdateFileContent={handleUpdateFileContent}
+            onUpsertFiles={handleUpsertFiles}
+            onRenameFile={handleRenameFile}
+            onDeleteFile={handleDeleteFile}
+            onRunScene={handleReloadScene}
             showLineNumbers={settings.showLineNumbers}
             onCollapse={() => setIsCodeOpen(false)}
           />

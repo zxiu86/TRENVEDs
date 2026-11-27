@@ -295,7 +295,7 @@ export default ${cssText};
   }
 
   const transforms: Array<'typescript' | 'jsx'> = [];
-  if (lower.endsWith('.ts') || lower.endsWith('.mts') || lower.endsWith('.tsx')) {
+  if (lower.endsWith('.ts') || lower.endsWith('.mts') || lower.endsWith('.cts') || lower.endsWith('.tsx')) {
     transforms.push('typescript');
   }
   if (lower.endsWith('.jsx') || lower.endsWith('.tsx')) {
@@ -498,8 +498,23 @@ export function compileSceneBundle(
       (fullTag, attrs: string) => {
         const hrefMatch = attrs.match(/\bhref=["']([^"']+)["']/i);
         if (!hrefMatch) return fullTag;
-        const target = resolveRelativeModulePath(entryFile.path, hrefMatch[1], files);
-        if (!target) return fullTag;
+        const href = hrefMatch[1].trim();
+        if (/^(?:https?:)?\/\//i.test(href) || href.startsWith('data:') || href.startsWith('blob:')) {
+          return fullTag;
+        }
+        const target = resolveRelativeModulePath(entryFile.path, href, files);
+        if (!target) {
+          if (href.startsWith('./') || href.startsWith('../') || href.startsWith('/')) {
+            diagnostics.push(
+              makeDiagnostic(
+                'compile-error',
+                `Stylesheet href "${href}" referenced in ${entryFile.path} was not found`,
+                entryFile.path
+              )
+            );
+          }
+          return fullTag;
+        }
         inlinedCssPaths.add(target.path);
         return `<style data-vfs="${target.path}">\n${target.content}\n</style>`;
       }
@@ -510,7 +525,14 @@ export function compileSceneBundle(
       /<script\b([^>]*)>([\s\S]*?)<\/script>/gi,
       (fullTag, attrs: string, inlineContent: string) => {
         const srcMatch = attrs.match(/\bsrc=["']([^"']+)["']/i);
-        const isModule = /\btype=["']module["']/i.test(attrs);
+        const typeMatch = attrs.match(/\btype=["']([^"']+)["']/i);
+        const scriptType = (typeMatch?.[1] ?? '').trim().toLowerCase();
+        const isModule = scriptType === 'module';
+        const isImportMap = scriptType === 'importmap';
+
+        if (isImportMap) {
+          return fullTag;
+        }
 
         if (srcMatch) {
           const src = srcMatch[1];
@@ -531,7 +553,7 @@ export function compileSceneBundle(
 
           const needsModule =
             isModule ||
-            /\.(tsx|jsx|ts|mjs)$/i.test(target.path) ||
+            /\.(tsx|jsx|ts|mts|cts|mjs)$/i.test(target.path) ||
             /\b(import|export)\b/.test(target.content);
 
           if (needsModule) {
@@ -545,30 +567,55 @@ export function compileSceneBundle(
         // Inline <script>
         if (!inlineContent.trim()) return fullTag;
 
+        const isInlineBabelOrTsx =
+          scriptType === 'text/babel' ||
+          scriptType === 'text/jsx' ||
+          scriptType === 'text/tsx' ||
+          scriptType === 'text/typescript';
         const hasEsm = /\b(?:import|export)\b/.test(inlineContent);
-        if (isModule || hasEsm) {
+
+        if (isModule || hasEsm || isInlineBabelOrTsx) {
+          const syntheticExt =
+            scriptType === 'text/tsx'
+              ? '.tsx'
+              : scriptType === 'text/jsx' || scriptType === 'text/babel'
+                ? '.jsx'
+                : scriptType === 'text/typescript'
+                  ? '.ts'
+                  : '.js';
           const syntheticFile: SceneFile = {
-            path: `${entryFile.path}.inline.js`,
+            path: `${entryFile.path}.inline${syntheticExt}`,
             content: inlineContent,
             updatedAt: entryFile.updatedAt,
           };
-          const transpiled = transpileCodeFile(syntheticFile);
-          const { code: rewritten, missingRelative } = rewriteModuleImports(
-            transpiled,
-            entryFile.path,
-            files,
-            compileVirtualModule,
-            (bare) => bareSpecifiers.add(bare)
-          );
-          for (const missing of missingRelative) {
-            diagnostics.push(
-              makeDiagnostic('compile-error', `Unresolved relative import "${missing}"`, entryFile.path)
+          try {
+            const transpiled = transpileCodeFile(syntheticFile);
+            const { code: rewritten, missingRelative } = rewriteModuleImports(
+              transpiled,
+              entryFile.path,
+              files,
+              compileVirtualModule,
+              (bare) => bareSpecifiers.add(bare)
             );
+            for (const missing of missingRelative) {
+              diagnostics.push(
+                makeDiagnostic('compile-error', `Unresolved relative import "${missing}"`, entryFile.path)
+              );
+            }
+            for (const spec of extractBareSpecifiersFromCode(rewritten)) {
+              bareSpecifiers.add(spec);
+            }
+            return `<script type="module" src="${toJsDataUrl(rewritten)}"></script>`;
+          } catch (err) {
+            diagnostics.push(
+              makeDiagnostic(
+                'compile-error',
+                err instanceof Error ? err.message : `Failed to compile inline script in ${entryFile.path}`,
+                entryFile.path
+              )
+            );
+            return fullTag;
           }
-          for (const spec of extractBareSpecifiersFromCode(rewritten)) {
-            bareSpecifiers.add(spec);
-          }
-          return `<script type="module" src="${toJsDataUrl(rewritten)}"></script>`;
         }
 
         return fullTag;
